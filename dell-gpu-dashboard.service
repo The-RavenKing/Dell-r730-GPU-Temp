@@ -1,0 +1,17 @@
+[Unit]
+Description=Dell R730 GPU Fan Control Dashboard Web Server
+After=network.target dell-gpu-fan-control.service
+Requires=dell-gpu-fan-control.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dell-gpu-fan-control
+ExecStart=/usr/bin/python3 /opt/dell-gpu-fan-control/dashboard_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

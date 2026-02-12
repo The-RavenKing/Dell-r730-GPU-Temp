@@ -1,0 +1,17 @@
+[Unit]
+Description=Dell R730 GPU Temperature-Based Fan Controller
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dell_gpu_fan_control.sh
+Restart=on-failure
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+# Restore automatic fan control on stop
+ExecStop=/usr/bin/ipmitool -I lanplus -H 192.168.1.100 -U root -P calvin raw 0x30 0x30 0x01 0x01
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,566 @@
+#!/bin/bash
+
+################################################################################
+# Dell R730 GPU Temperature-Based Fan Controller
+# Optimized for LLM Inference Workloads (Ollama, KoboldCPP, etc.)
+# 
+# This script monitors Nvidia GPU temperature and dynamically adjusts Dell
+# server fan speeds via IPMI to maintain optimal cooling without excessive noise.
+#
+# Features:
+# - Fast 5-second response for bursty LLM workloads
+# - Hysteresis: fans ramp UP immediately, ramp DOWN gradually
+# - Prevents fan speed oscillation during load transitions
+#
+# Requirements:
+# - ipmitool installed and configured
+# - nvidia-smi (comes with Nvidia drivers)
+# - IPMI over LAN enabled in iDRAC
+################################################################################
+
+# Configuration
+IDRAC_HOST="192.168.1.100"  # Change to your iDRAC IP
+IDRAC_USER="root"            # Change to your iDRAC username
+IDRAC_PASS="calvin"          # Change to your iDRAC password
+
+# Temperature thresholds (in Celsius) - Optimized for LLM inference
+TEMP_LOW=40        # Below this: minimum fan speed
+TEMP_NORMAL=50     # Normal operating temperature
+TEMP_WARM=60       # Start increasing fans
+TEMP_HOT=70        # High fan speed
+TEMP_CRITICAL=80   # Maximum fan speed
+
+# Fan speed settings (in hex, 0x00-0x64 = 0-100%)
+FAN_MIN=0x14       # 20% - minimum for airflow
+FAN_LOW=0x1E       # 30% - quiet operation
+FAN_NORMAL=0x28    # 40% - normal operation
+FAN_MEDIUM=0x37    # 55% - moderate cooling
+FAN_HIGH=0x46      # 70% - increased cooling
+FAN_MAX=0x64       # 100% - maximum cooling
+
+# Check interval in seconds (5s for fast response to LLM inference bursts)
+CHECK_INTERVAL=5
+
+# Hysteresis settings (prevent fan oscillation)
+# Fans ramp UP immediately when temp rises
+# Fans ramp DOWN only after temp stays low for this many seconds
+RAMPDOWN_DELAY=20  # Wait 20 seconds of low temp before decreasing fans
+
+# Log file
+LOG_FILE="/var/log/dell_gpu_fan_control.log"
+
+# Database file for web dashboard
+DB_FILE="/var/lib/dell_gpu_fan_control/metrics.db"
+
+################################################################################
+# Functions
+################################################################################
+
+init_database() {
+    # Create database directory if it doesn't exist
+    local db_dir=$(dirname "$DB_FILE")
+    if [ ! -d "$db_dir" ]; then
+        mkdir -p "$db_dir"
+        chmod 755 "$db_dir"
+    fi
+    
+    # Initialize SQLite database with tables
+    sqlite3 "$DB_FILE" <<EOF
+CREATE TABLE IF NOT EXISTS temperature_readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    gpu_temp INTEGER NOT NULL,
+    hotspot_temp INTEGER NOT NULL,
+    memory_temp INTEGER NOT NULL,
+    max_temp INTEGER NOT NULL,
+    fan_speed INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fan_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    temperature INTEGER NOT NULL,
+    fan_speed INTEGER NOT NULL,
+    details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS statistics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_start INTEGER NOT NULL,
+    period_end INTEGER NOT NULL,
+    peak_gpu_temp INTEGER NOT NULL,
+    peak_hotspot_temp INTEGER NOT NULL,
+    peak_memory_temp INTEGER NOT NULL,
+    avg_gpu_temp INTEGER NOT NULL,
+    max_fan_events INTEGER NOT NULL,
+    high_temp_warnings INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_temp_timestamp ON temperature_readings(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON fan_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_stats_period ON statistics(period_start, period_end);
+EOF
+    
+    if [ $? -eq 0 ]; then
+        log_message "Database initialized at $DB_FILE"
+        return 0
+    else
+        log_message "ERROR: Failed to initialize database"
+        return 1
+    fi
+}
+
+log_to_database() {
+    local timestamp=$(date +%s)
+    local gpu_temp=$1
+    local hotspot_temp=$2
+    local memory_temp=$3
+    local max_temp=$4
+    local fan_speed_hex=$5
+    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    
+    sqlite3 "$DB_FILE" <<EOF
+INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed)
+VALUES ($timestamp, $gpu_temp, $hotspot_temp, $memory_temp, $max_temp, $fan_speed_dec);
+EOF
+}
+
+log_fan_event() {
+    local timestamp=$(date +%s)
+    local event_type=$1
+    local temperature=$2
+    local fan_speed_hex=$3
+    local details=$4
+    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    
+    sqlite3 "$DB_FILE" <<EOF
+INSERT INTO fan_events (timestamp, event_type, temperature, fan_speed, details)
+VALUES ($timestamp, '$event_type', $temperature, $fan_speed_dec, '$details');
+EOF
+}
+
+save_statistics_to_database() {
+    local period_end=$(date +%s)
+    local avg_temp=0
+    if [ "$STATS_TEMP_READINGS" -gt 0 ]; then
+        avg_temp=$((STATS_TEMP_SUM / STATS_TEMP_READINGS))
+    fi
+    
+    sqlite3 "$DB_FILE" <<EOF
+INSERT INTO statistics (period_start, period_end, peak_gpu_temp, peak_hotspot_temp, peak_memory_temp, 
+                       avg_gpu_temp, max_fan_events, high_temp_warnings)
+VALUES ($STATS_START_TIME, $period_end, $STATS_PEAK_GPU_TEMP, $STATS_PEAK_HOTSPOT_TEMP, 
+        $STATS_PEAK_MEMORY_TEMP, $avg_temp, $STATS_MAX_FAN_COUNT, $STATS_HIGH_TEMP_WARNINGS);
+EOF
+}
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+get_gpu_temps() {
+    # Get GPU temperatures from multiple sensors
+    # Returns: "gpu_temp hotspot_temp memory_temp" or "-1 -1 -1" if error
+    local temps
+    temps=$(nvidia-smi --query-gpu=temperature.gpu,temperature.memory --format=csv,noheader,nounits 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ -n "$temps" ]; then
+        # Parse the output: "gpu, memory"
+        local gpu_temp=$(echo "$temps" | awk -F', ' '{print $1}')
+        local memory_temp=$(echo "$temps" | awk -F', ' '{print $2}')
+        
+        # Try to get hotspot temp (not all GPUs support this)
+        local hotspot_temp=$(nvidia-smi --query-gpu=temperature.memory --format=csv,noheader,nounits 2>/dev/null | head -1)
+        
+        # If hotspot query fails, use GPU temp as fallback
+        if [ -z "$hotspot_temp" ] || [ "$hotspot_temp" = "[Not Supported]" ]; then
+            hotspot_temp=$gpu_temp
+        fi
+        
+        echo "$gpu_temp $hotspot_temp $memory_temp"
+    else
+        echo "-1 -1 -1"
+    fi
+}
+
+get_max_temp() {
+    # Get the maximum temperature from all sensors
+    # This is what we'll use for fan control decisions
+    local temps="$1"
+    local gpu_temp=$(echo "$temps" | awk '{print $1}')
+    local hotspot_temp=$(echo "$temps" | awk '{print $2}')
+    local memory_temp=$(echo "$temps" | awk '{print $3}')
+    
+    # Find maximum
+    local max_temp=$gpu_temp
+    if [ "$hotspot_temp" -gt "$max_temp" ] 2>/dev/null; then
+        max_temp=$hotspot_temp
+    fi
+    if [ "$memory_temp" -gt "$max_temp" ] 2>/dev/null; then
+        max_temp=$memory_temp
+    fi
+    
+    echo "$max_temp"
+}
+
+set_fan_speed() {
+    local speed_hex=$1
+    local speed_percent=$((16#${speed_hex#0x}))
+    
+    # Command to set manual fan speed
+    ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" \
+        raw 0x30 0x30 0x02 0xff "$speed_hex" >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log_message "Fan speed set to ${speed_percent}% (${speed_hex})"
+        return 0
+    else
+        log_message "ERROR: Failed to set fan speed"
+        return 1
+    fi
+}
+
+enable_manual_fan_control() {
+    # Enable manual fan control mode
+    ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" \
+        raw 0x30 0x30 0x01 0x00 >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log_message "Manual fan control enabled"
+        return 0
+    else
+        log_message "ERROR: Failed to enable manual fan control"
+        return 1
+    fi
+}
+
+disable_manual_fan_control() {
+    # Restore automatic fan control
+    ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" \
+        raw 0x30 0x30 0x01 0x01 >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log_message "Automatic fan control restored"
+        return 0
+    else
+        log_message "ERROR: Failed to restore automatic fan control"
+        return 1
+    fi
+}
+
+disable_third_party_pcie_response() {
+    # Disable Dell's aggressive third-party PCIe card cooling
+    ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" \
+        raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00 >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        log_message "Third-party PCIe cooling response disabled"
+        return 0
+    else
+        log_message "WARNING: Failed to disable third-party PCIe cooling response"
+        return 1
+    fi
+}
+
+calculate_fan_speed_target() {
+    # Calculate what the fan speed SHOULD be based purely on temperature
+    local temp=$1
+    local fan_speed
+    
+    if [ "$temp" -lt "$TEMP_LOW" ]; then
+        fan_speed=$FAN_MIN
+    elif [ "$temp" -lt "$TEMP_NORMAL" ]; then
+        fan_speed=$FAN_LOW
+    elif [ "$temp" -lt "$TEMP_WARM" ]; then
+        fan_speed=$FAN_NORMAL
+    elif [ "$temp" -lt "$TEMP_HOT" ]; then
+        fan_speed=$FAN_MEDIUM
+    elif [ "$temp" -lt "$TEMP_CRITICAL" ]; then
+        fan_speed=$FAN_HIGH
+    else
+        fan_speed=$FAN_MAX
+    fi
+    
+    echo "$fan_speed"
+}
+
+calculate_fan_speed_with_hysteresis() {
+    # Apply hysteresis: ramp UP immediately, ramp DOWN gradually
+    local temp=$1
+    local current_speed_hex=$2
+    local target_speed_hex=$3
+    
+    # Convert hex to decimal for comparison
+    local current_speed=$((16#${current_speed_hex#0x}))
+    local target_speed=$((16#${target_speed_hex#0x}))
+    
+    if [ "$target_speed" -gt "$current_speed" ]; then
+        # Temperature rising or higher fan needed - respond immediately
+        echo "$target_speed_hex"
+        return 0
+    elif [ "$target_speed" -lt "$current_speed" ]; then
+        # Temperature dropping - check if it's been low long enough
+        # This check happens in the main loop using elapsed time
+        echo "$target_speed_hex"
+        return 1  # Signal that this is a decrease
+    else
+        # No change needed
+        echo "$current_speed_hex"
+        return 2  # Signal no change
+    fi
+}
+
+cleanup() {
+    log_message "Received termination signal, cleaning up..."
+    log_statistics_summary
+    save_statistics_to_database
+    disable_manual_fan_control
+    log_message "Script terminated"
+    exit 0
+}
+
+# Statistics tracking functions
+reset_statistics() {
+    STATS_START_TIME=$(date +%s)
+    STATS_PEAK_GPU_TEMP=0
+    STATS_PEAK_HOTSPOT_TEMP=0
+    STATS_PEAK_MEMORY_TEMP=0
+    STATS_MAX_FAN_COUNT=0
+    STATS_TEMP_READINGS=0
+    STATS_TEMP_SUM=0
+    STATS_HIGH_TEMP_WARNINGS=0
+}
+
+update_statistics() {
+    local gpu_temp=$1
+    local hotspot_temp=$2
+    local memory_temp=$3
+    local fan_speed_hex=$4
+    
+    # Track peak temperatures
+    if [ "$gpu_temp" -gt "$STATS_PEAK_GPU_TEMP" ]; then
+        STATS_PEAK_GPU_TEMP=$gpu_temp
+    fi
+    if [ "$hotspot_temp" -gt "$STATS_PEAK_HOTSPOT_TEMP" ]; then
+        STATS_PEAK_HOTSPOT_TEMP=$hotspot_temp
+    fi
+    if [ "$memory_temp" -gt "$STATS_PEAK_MEMORY_TEMP" ]; then
+        STATS_PEAK_MEMORY_TEMP=$memory_temp
+    fi
+    
+    # Track average temperature
+    STATS_TEMP_READINGS=$((STATS_TEMP_READINGS + 1))
+    STATS_TEMP_SUM=$((STATS_TEMP_SUM + gpu_temp))
+    
+    # Count max fan speed events
+    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    if [ "$fan_speed_dec" -ge 90 ]; then
+        STATS_MAX_FAN_COUNT=$((STATS_MAX_FAN_COUNT + 1))
+    fi
+    
+    # Track high temperature warnings
+    if [ "$gpu_temp" -ge "$TEMP_HOT" ]; then
+        STATS_HIGH_TEMP_WARNINGS=$((STATS_HIGH_TEMP_WARNINGS + 1))
+    fi
+}
+
+log_statistics_summary() {
+    local runtime=$(($(date +%s) - STATS_START_TIME))
+    local runtime_hours=$((runtime / 3600))
+    local runtime_mins=$(((runtime % 3600) / 60))
+    
+    local avg_temp=0
+    if [ "$STATS_TEMP_READINGS" -gt 0 ]; then
+        avg_temp=$((STATS_TEMP_SUM / STATS_TEMP_READINGS))
+    fi
+    
+    log_message "=========================================="
+    log_message "Statistics Summary (Runtime: ${runtime_hours}h ${runtime_mins}m)"
+    log_message "Peak GPU Temp: ${STATS_PEAK_GPU_TEMP}°C"
+    log_message "Peak Hotspot Temp: ${STATS_PEAK_HOTSPOT_TEMP}°C"
+    log_message "Peak Memory Temp: ${STATS_PEAK_MEMORY_TEMP}°C"
+    log_message "Average GPU Temp: ${avg_temp}°C"
+    log_message "High Fan Speed Events (90%+): ${STATS_MAX_FAN_COUNT}"
+    log_message "High Temperature Warnings (${TEMP_HOT}°C+): ${STATS_HIGH_TEMP_WARNINGS}"
+    
+    # Cooling adequacy assessment
+    if [ "$STATS_PEAK_GPU_TEMP" -ge "$TEMP_CRITICAL" ]; then
+        log_message "⚠️  WARNING: Peak temps reached critical levels. Consider:"
+        log_message "   - Lowering temperature thresholds"
+        log_message "   - Increasing minimum fan speeds"
+        log_message "   - Checking for dust buildup"
+    elif [ "$STATS_HIGH_TEMP_WARNINGS" -gt $((STATS_TEMP_READINGS / 4)) ]; then
+        log_message "⚠️  NOTICE: GPU running hot frequently (>25% of time)"
+        log_message "   Consider lowering TEMP_WARM threshold by 5°C"
+    fi
+    
+    log_message "=========================================="
+}
+
+################################################################################
+# Main
+################################################################################
+
+# Set up signal handlers
+trap cleanup SIGINT SIGTERM
+
+log_message "=========================================="
+log_message "Dell GPU Fan Controller Starting"
+log_message "=========================================="
+
+# Check if nvidia-smi is available
+if ! command -v nvidia-smi &> /dev/null; then
+    log_message "ERROR: nvidia-smi not found. Please install Nvidia drivers."
+    exit 1
+fi
+
+# Check if ipmitool is available
+if ! command -v ipmitool &> /dev/null; then
+    log_message "ERROR: ipmitool not found. Please install ipmitool."
+    exit 1
+fi
+
+# Check if sqlite3 is available
+if ! command -v sqlite3 &> /dev/null; then
+    log_message "WARNING: sqlite3 not found. Web dashboard will not work. Install with: apt-get install sqlite3"
+    DB_FILE=""  # Disable database logging
+else
+    # Initialize database for web dashboard
+    log_message "Initializing database for web dashboard..."
+    init_database
+fi
+
+# Initial setup
+log_message "Disabling third-party PCIe cooling response..."
+disable_third_party_pcie_response
+sleep 2
+
+log_message "Enabling manual fan control..."
+enable_manual_fan_control
+sleep 2
+
+# Main monitoring loop
+log_message "Starting temperature monitoring loop (checking every ${CHECK_INTERVAL}s)..."
+log_message "Monitoring: GPU core, hotspot, and memory temperatures"
+log_message "Hysteresis enabled: Fans ramp UP immediately, ramp DOWN after ${RAMPDOWN_DELAY}s"
+current_fan_speed=""
+pending_decrease_speed=""
+decrease_pending_since=0
+reset_statistics
+last_stats_report=$(date +%s)
+STATS_REPORT_INTERVAL=3600  # Report statistics every hour
+
+while true; do
+    # Get current GPU temperatures from all sensors
+    temps=$(get_gpu_temps)
+    gpu_temp=$(echo "$temps" | awk '{print $1}')
+    hotspot_temp=$(echo "$temps" | awk '{print $2}')
+    memory_temp=$(echo "$temps" | awk '{print $3}')
+    
+    if [ "$gpu_temp" -eq -1 ]; then
+        log_message "ERROR: Could not read GPU temperature. Restoring automatic control."
+        disable_manual_fan_control
+        sleep 60
+        enable_manual_fan_control
+        continue
+    fi
+    
+    # Get the maximum temperature across all sensors for fan control
+    max_temp=$(get_max_temp "$temps")
+    
+    # Log to database for web dashboard (if enabled)
+    if [ -n "$DB_FILE" ] && [ -n "$current_fan_speed" ]; then
+        log_to_database "$gpu_temp" "$hotspot_temp" "$memory_temp" "$max_temp" "$current_fan_speed"
+    fi
+    
+    # Update statistics
+    if [ -n "$current_fan_speed" ]; then
+        update_statistics "$gpu_temp" "$hotspot_temp" "$memory_temp" "$current_fan_speed"
+    fi
+    
+    # Calculate target fan speed based on maximum temperature
+    target_fan_speed=$(calculate_fan_speed_target "$max_temp")
+    
+    # Convert hex to decimal for comparison
+    if [ -n "$current_fan_speed" ]; then
+        current_speed_dec=$((16#${current_fan_speed#0x}))
+    else
+        current_speed_dec=0
+    fi
+    target_speed_dec=$((16#${target_fan_speed#0x}))
+    
+    # Determine if we need to change fan speed
+    if [ "$target_speed_dec" -gt "$current_speed_dec" ]; then
+        # Temperature rising - respond IMMEDIATELY
+        log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → INCREASING fans"
+        set_fan_speed "$target_fan_speed"
+        current_fan_speed=$target_fan_speed
+        pending_decrease_speed=""
+        decrease_pending_since=0
+        
+        # Log event to database
+        if [ -n "$DB_FILE" ]; then
+            log_fan_event "INCREASE" "$max_temp" "$target_fan_speed" "Temp rising"
+        fi
+        
+    elif [ "$target_speed_dec" -lt "$current_speed_dec" ]; then
+        # Temperature dropping - apply hysteresis
+        
+        if [ "$pending_decrease_speed" != "$target_fan_speed" ]; then
+            # This is a new decrease request, start the timer
+            pending_decrease_speed=$target_fan_speed
+            decrease_pending_since=$(date +%s)
+            log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Lower fans possible, waiting ${RAMPDOWN_DELAY}s"
+        else
+            # We're already waiting for this decrease
+            current_time=$(date +%s)
+            elapsed=$((current_time - decrease_pending_since))
+            
+            if [ "$elapsed" -ge "$RAMPDOWN_DELAY" ]; then
+                # Enough time has passed, apply the decrease
+                log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → DECREASING fans (stable ${elapsed}s)"
+                set_fan_speed "$target_fan_speed"
+                current_fan_speed=$target_fan_speed
+                pending_decrease_speed=""
+                decrease_pending_since=0
+                
+                # Log event to database
+                if [ -n "$DB_FILE" ]; then
+                    log_fan_event "DECREASE" "$max_temp" "$target_fan_speed" "Temp stable ${elapsed}s"
+                fi
+            else
+                # Still waiting
+                remaining=$((RAMPDOWN_DELAY - elapsed))
+                log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Waiting ${remaining}s before decreasing"
+            fi
+        fi
+        
+    else
+        # Temperature stable at current fan speed
+        log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Fan speed optimal"
+        # Reset any pending decrease since we're at the right speed
+        pending_decrease_speed=""
+        decrease_pending_since=0
+    fi
+    
+    # Check for concerning temperature patterns
+    if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
+        log_message "⚠️  CRITICAL: Temperature at ${max_temp}°C! Fans at maximum."
+    elif [ "$max_temp" -ge "$TEMP_HOT" ] && [ "$hotspot_temp" -gt "$gpu_temp" ]; then
+        log_message "⚠️  NOTICE: Hotspot temp significantly higher than GPU average (Δ$((hotspot_temp - gpu_temp))°C)"
+    fi
+    
+    # Periodic statistics report
+    current_time=$(date +%s)
+    if [ $((current_time - last_stats_report)) -ge "$STATS_REPORT_INTERVAL" ]; then
+        log_statistics_summary
+        if [ -n "$DB_FILE" ]; then
+            save_statistics_to_database
+        fi
+        reset_statistics
+        last_stats_report=$current_time
+    fi
+    
+    sleep "$CHECK_INTERVAL"
+done
