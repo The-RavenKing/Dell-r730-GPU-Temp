@@ -474,6 +474,30 @@ If you see these, increase the fan speeds in the script or restore automatic con
 - Verify iDRAC credentials are correct
 - Test script manually first
 
+## Future Implementation: AI-Driven Analytics & Control
+
+**Concept:**
+We are exploring the integration of an AI model to analyze long-term temperature and usage patterns. Instead of relying solely on static thresholds, this system would:
+
+1.  **Learn Your Workload:**
+    -   Monitor GPU usage patterns over days/weeks (e.g., identifying when heavy inference tasks usually occur).
+    -   Correlate fan speeds with temperature drop rates to understand cooling efficiency in your specific environment.
+
+2.  **Predictive Cooling:**
+    -   Anticipate temperature spikes based on historical usage data.
+    -   Pre-emptively ramp up fans *before* a heavy task causes thermal throttling, smoothing out the temperature curve.
+
+3.  **Optimization Suggestions:**
+    -   Analyze the relationship between fan speed and temperature to find the "sweet spot" for noise vs. cooling.
+    -   Examples:
+        -   "You could lower fan speeds by 10% during idle periods with no risk."
+        -   "Your GPU hotspot delta is increasing; consider repasting."
+
+4.  **Anomaly Detection:**
+    -   Detect if cooling performance degrades over time (e.g., due to dust buildup) by comparing current cooling efficiency against the baseline.
+
+*Note: This is currently in the conceptual phase.*
+
 ## Alternative Solutions
 
 1. **Pre-made Docker solution**: Check out [tigerblue77/Dell_iDRAC_fan_controller_Docker](https://github.com/tigerblue77/Dell_iDRAC_fan_controller_Docker)
