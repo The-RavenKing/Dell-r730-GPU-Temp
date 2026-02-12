@@ -11,6 +11,7 @@ StandardOutput=journal
 StandardError=journal
 
 # Restore automatic fan control on stop
+# WARNING: These credentials must match variables in dell_gpu_fan_control.sh
 ExecStop=/usr/bin/ipmitool -I lanplus -H 192.168.1.100 -U root -P calvin raw 0x30 0x30 0x01 0x01
 
 [Install]

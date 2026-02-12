@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - GPU Fan Control Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #60a5fa;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        .nav-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        .nav-btn {
+            background: #334155;
+            color: #94a3b8;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover {
+            background: #475569;
+            color: #e2e8f0;
+        }
+
+        .nav-btn.active {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        .settings-section {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 1.2rem;
+            color: #e2e8f0;
+        }
+
+        .section-icon {
+            font-size: 1.4rem;
+            margin-right: 8px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .form-row.single {
+            grid-template-columns: 1fr;
+        }
+
+        .form-group {
+            margin-bottom: 0;
+        }
+
+        .form-group label {
+            display: block;
+            color: #94a3b8;
+            font-size: 0.8rem;
+            margin-bottom: 6px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            color: #e2e8f0;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus {
+            border-color: #3b82f6;
+        }
+
+        .form-group input::placeholder {
+            color: #475569;
+        }
+
+        .form-group .hint {
+            color: #64748b;
+            font-size: 0.75rem;
+            margin-top: 4px;
+        }
+
+        .save-btn {
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .save-btn:hover {
+            background: #2563eb;
+        }
+
+        .save-btn:disabled {
+            background: #475569;
+            cursor: not-allowed;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            padding: 14px 24px;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s ease;
+            z-index: 1000;
+            max-width: 400px;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .toast.success {
+            background: #065f46;
+            color: #a7f3d0;
+        }
+
+        .toast.error {
+            background: #7f1d1d;
+            color: #fecaca;
+        }
+
+        .divider {
+            border: none;
+            border-top: 1px solid #334155;
+            margin: 20px 0;
+        }
+
+        .warning-text {
+            background: #78350f;
+            color: #fde68a;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            margin-bottom: 15px;
+        }
+
+        .threshold-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 15px;
+        }
+
+        .threshold-card {
+            background: #0f172a;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .threshold-card label {
+            color: #94a3b8;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+            display: block;
+        }
+
+        .threshold-card input {
+            width: 80px;
+            text-align: center;
+            padding: 8px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #e2e8f0;
+            font-size: 1.1rem;
+            font-weight: 600;
+            outline: none;
+        }
+
+        .threshold-card input:focus {
+            border-color: #3b82f6;
+        }
+
+        .threshold-card .unit {
+            color: #64748b;
+            font-size: 0.8rem;
+            margin-left: 2px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>⚙️ Settings</h1>
+            <div class="subtitle">Dell R730 GPU Fan Control Configuration</div>
+        </header>
+
+        <div class="nav-bar">
+            <a href="/" class="nav-btn">← Dashboard</a>
+            <a href="/settings" class="nav-btn active">Settings</a>
+            <a href="/logout" class="nav-btn">Logout</a>
+        </div>
+
+        <!-- Dashboard Credentials -->
+        <div class="settings-section">
+            <div class="section-header">
+                <div class="section-title"><span class="section-icon">🔐</span>Dashboard Credentials</div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="newUsername">Username</label>
+                    <input type="text" id="newUsername" value="{{ config.dashboard.username }}" placeholder="admin">
+                </div>
+                <div class="form-group">
+                    <label for="currentPassword">Current Password</label>
+                    <input type="password" id="currentPassword" placeholder="Required to save changes">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="newPassword">New Password</label>
+                    <input type="password" id="newPassword" placeholder="Leave blank to keep current">
+                </div>
+                <div class="form-group">
+                    <label for="confirmPassword">Confirm New Password</label>
+                    <input type="password" id="confirmPassword" placeholder="Confirm new password">
+                </div>
+            </div>
+            <button class="save-btn" onclick="saveCredentials()">Save Credentials</button>
+        </div>
+
+        <!-- iDRAC Connection -->
+        <div class="settings-section">
+            <div class="section-header">
+                <div class="section-title"><span class="section-icon">🖥️</span>iDRAC Connection</div>
+            </div>
+            <div class="warning-text">
+                ⚠️ Changes require a restart of the fan control service:
+                <code>sudo systemctl restart dell-gpu-fan-control</code>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="idracHost">iDRAC IP Address</label>
+                    <input type="text" id="idracHost" value="{{ config.idrac.host }}" placeholder="192.168.1.100">
+                    <div class="hint">Static IP recommended</div>
+                </div>
+                <div class="form-group">
+                    <label for="idracUsername">iDRAC Username</label>
+                    <input type="text" id="idracUsername" value="{{ config.idrac.username }}" placeholder="root">
+                </div>
+            </div>
+            <div class="form-row single">
+                <div class="form-group">
+                    <label for="idracPassword">iDRAC Password</label>
+                    <input type="password" id="idracPassword" value="{{ config.idrac.password }}"
+                        placeholder="iDRAC password">
+                </div>
+            </div>
+            <button class="save-btn" onclick="saveIdrac()">Save iDRAC Settings</button>
+        </div>
+
+        <!-- Fan Control Thresholds -->
+        <div class="settings-section">
+            <div class="section-header">
+                <div class="section-title"><span class="section-icon">🌡️</span>Fan Control Thresholds</div>
+            </div>
+            <div class="warning-text">
+                ⚠️ Changes require a restart of the fan control service. Thresholds must be in ascending order.
+            </div>
+
+            <label
+                style="color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; display: block;">Temperature
+                Thresholds (°C)</label>
+            <div class="threshold-grid">
+                <div class="threshold-card">
+                    <label for="tempLow">Low (Min Fans)</label>
+                    <input type="number" id="tempLow" value="{{ config.fan_control.temp_low }}"><span
+                        class="unit">°C</span>
+                </div>
+                <div class="threshold-card">
+                    <label for="tempNormal">Normal</label>
+                    <input type="number" id="tempNormal" value="{{ config.fan_control.temp_normal }}"><span
+                        class="unit">°C</span>
+                </div>
+                <div class="threshold-card">
+                    <label for="tempWarm">Warm</label>
+                    <input type="number" id="tempWarm" value="{{ config.fan_control.temp_warm }}"><span
+                        class="unit">°C</span>
+                </div>
+                <div class="threshold-card">
+                    <label for="tempHot">Hot</label>
+                    <input type="number" id="tempHot" value="{{ config.fan_control.temp_hot }}"><span
+                        class="unit">°C</span>
+                </div>
+                <div class="threshold-card">
+                    <label for="tempCritical">Critical (Max)</label>
+                    <input type="number" id="tempCritical" value="{{ config.fan_control.temp_critical }}"><span
+                        class="unit">°C</span>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <label
+                style="color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; display: block;">Timing</label>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="checkInterval">Check Interval</label>
+                    <input type="number" id="checkInterval" value="{{ config.fan_control.check_interval }}" min="2"
+                        max="60">
+                    <div class="hint">Seconds between temperature checks (2-60)</div>
+                </div>
+                <div class="form-group">
+                    <label for="rampdownDelay">Rampdown Delay</label>
+                    <input type="number" id="rampdownDelay" value="{{ config.fan_control.rampdown_delay }}" min="5"
+                        max="120">
+                    <div class="hint">Seconds to wait before decreasing fans (5-120)</div>
+                </div>
+            </div>
+            <button class="save-btn" onclick="saveFanSettings()">Save Fan Settings</button>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = (type === 'success' ? '✅ ' : '⚠️ ') + message;
+            toast.className = 'toast ' + type + ' show';
+            setTimeout(() => { toast.classList.remove('show'); }, 4000);
+        }
+
+        async function saveCredentials() {
+            const currentPassword = document.getElementById('currentPassword').value;
+            const newPassword = document.getElementById('newPassword').value;
+            const confirmPassword = document.getElementById('confirmPassword').value;
+            const newUsername = document.getElementById('newUsername').value;
+
+            if (!currentPassword) {
+                showToast('Current password is required', 'error');
+                return;
+            }
+
+            if (newPassword && newPassword !== confirmPassword) {
+                showToast('New passwords do not match', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/settings/credentials', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: currentPassword,
+                        new_username: newUsername,
+                        new_password: newPassword
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(data.message);
+                    document.getElementById('currentPassword').value = '';
+                    document.getElementById('newPassword').value = '';
+                    document.getElementById('confirmPassword').value = '';
+                } else {
+                    showToast(data.error, 'error');
+                }
+            } catch (err) {
+                showToast('Failed to save: ' + err.message, 'error');
+            }
+        }
+
+        async function saveIdrac() {
+            const host = document.getElementById('idracHost').value;
+            const username = document.getElementById('idracUsername').value;
+            const password = document.getElementById('idracPassword').value;
+
+            if (!host || !username || !password) {
+                showToast('All iDRAC fields are required', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/settings/idrac', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, username, password })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(data.message);
+                } else {
+                    showToast(data.error, 'error');
+                }
+            } catch (err) {
+                showToast('Failed to save: ' + err.message, 'error');
+            }
+        }
+
+        async function saveFanSettings() {
+            const settings = {
+                temp_low: document.getElementById('tempLow').value,
+                temp_normal: document.getElementById('tempNormal').value,
+                temp_warm: document.getElementById('tempWarm').value,
+                temp_hot: document.getElementById('tempHot').value,
+                temp_critical: document.getElementById('tempCritical').value,
+                check_interval: document.getElementById('checkInterval').value,
+                rampdown_delay: document.getElementById('rampdownDelay').value
+            };
+
+            try {
+                const response = await fetch('/api/settings/fan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(data.message);
+                } else {
+                    showToast(data.error, 'error');
+                }
+            } catch (err) {
+                showToast('Failed to save: ' + err.message, 'error');
+            }
+        }
+    </script>
+</body>
+
+</html>

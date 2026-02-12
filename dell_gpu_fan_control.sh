@@ -18,17 +18,34 @@
 # - IPMI over LAN enabled in iDRAC
 ################################################################################
 
-# Configuration
-IDRAC_HOST="192.168.1.100"  # Change to your iDRAC IP
-IDRAC_USER="root"            # Change to your iDRAC username
-IDRAC_PASS="calvin"          # Change to your iDRAC password
+# Configuration - loaded from config.json if available, otherwise defaults
+CONFIG_FILE="/var/lib/dell_gpu_fan_control/config.json"
 
-# Temperature thresholds (in Celsius) - Optimized for LLM inference
-TEMP_LOW=40        # Below this: minimum fan speed
-TEMP_NORMAL=50     # Normal operating temperature
-TEMP_WARM=60       # Start increasing fans
-TEMP_HOT=70        # High fan speed
-TEMP_CRITICAL=80   # Maximum fan speed
+# Defaults (used if config.json is missing or jq is not installed)
+IDRAC_HOST="192.168.1.100"
+IDRAC_USER="root"
+IDRAC_PASS="calvin"
+TEMP_LOW=40
+TEMP_NORMAL=50
+TEMP_WARM=60
+TEMP_HOT=70
+TEMP_CRITICAL=80
+CHECK_INTERVAL=5
+RAMPDOWN_DELAY=20
+
+# Load from config.json if available
+if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
+    IDRAC_HOST=$(jq -r '.idrac.host // empty' "$CONFIG_FILE" 2>/dev/null || echo "$IDRAC_HOST")
+    IDRAC_USER=$(jq -r '.idrac.username // empty' "$CONFIG_FILE" 2>/dev/null || echo "$IDRAC_USER")
+    IDRAC_PASS=$(jq -r '.idrac.password // empty' "$CONFIG_FILE" 2>/dev/null || echo "$IDRAC_PASS")
+    TEMP_LOW=$(jq -r '.fan_control.temp_low // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_LOW")
+    TEMP_NORMAL=$(jq -r '.fan_control.temp_normal // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_NORMAL")
+    TEMP_WARM=$(jq -r '.fan_control.temp_warm // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_WARM")
+    TEMP_HOT=$(jq -r '.fan_control.temp_hot // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_HOT")
+    TEMP_CRITICAL=$(jq -r '.fan_control.temp_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_CRITICAL")
+    CHECK_INTERVAL=$(jq -r '.fan_control.check_interval // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHECK_INTERVAL")
+    RAMPDOWN_DELAY=$(jq -r '.fan_control.rampdown_delay // empty' "$CONFIG_FILE" 2>/dev/null || echo "$RAMPDOWN_DELAY")
+fi
 
 # Fan speed settings (in hex, 0x00-0x64 = 0-100%)
 FAN_MIN=0x14       # 20% - minimum for airflow
@@ -37,14 +54,6 @@ FAN_NORMAL=0x28    # 40% - normal operation
 FAN_MEDIUM=0x37    # 55% - moderate cooling
 FAN_HIGH=0x46      # 70% - increased cooling
 FAN_MAX=0x64       # 100% - maximum cooling
-
-# Check interval in seconds (5s for fast response to LLM inference bursts)
-CHECK_INTERVAL=5
-
-# Hysteresis settings (prevent fan oscillation)
-# Fans ramp UP immediately when temp rises
-# Fans ramp DOWN only after temp stays low for this many seconds
-RAMPDOWN_DELAY=20  # Wait 20 seconds of low temp before decreasing fans
 
 # Log file
 LOG_FILE="/var/log/dell_gpu_fan_control.log"
@@ -55,6 +64,11 @@ DB_FILE="/var/lib/dell_gpu_fan_control/metrics.db"
 ################################################################################
 # Functions
 ################################################################################
+
+hex_to_dec() {
+    # Convert hex fan speed (e.g. 0x28) to decimal (e.g. 40)
+    echo $((16#${1#0x}))
+}
 
 init_database() {
     # Create database directory if it doesn't exist
@@ -112,13 +126,16 @@ EOF
 }
 
 log_to_database() {
+    if [ -z "$DB_FILE" ]; then
+        return
+    fi
     local timestamp=$(date +%s)
     local gpu_temp=$1
     local hotspot_temp=$2
     local memory_temp=$3
     local max_temp=$4
     local fan_speed_hex=$5
-    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     
     sqlite3 "$DB_FILE" <<EOF
 INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed)
@@ -127,12 +144,17 @@ EOF
 }
 
 log_fan_event() {
+    if [ -z "$DB_FILE" ]; then
+        return
+    fi
     local timestamp=$(date +%s)
     local event_type=$1
     local temperature=$2
     local fan_speed_hex=$3
     local details=$4
-    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    # Escape single quotes for SQL safety
+    details=${details//\'/\'\'}
+    local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     
     sqlite3 "$DB_FILE" <<EOF
 INSERT INTO fan_events (timestamp, event_type, temperature, fan_speed, details)
@@ -162,22 +184,36 @@ log_message() {
 get_gpu_temps() {
     # Get GPU temperatures from multiple sensors
     # Returns: "gpu_temp hotspot_temp memory_temp" or "-1 -1 -1" if error
-    local temps
-    temps=$(nvidia-smi --query-gpu=temperature.gpu,temperature.memory --format=csv,noheader,nounits 2>/dev/null)
+    local gpu_temp
+    local memory_temp
+    local hotspot_temp
     
-    if [ $? -eq 0 ] && [ -n "$temps" ]; then
-        # Parse the output: "gpu, memory"
-        local gpu_temp=$(echo "$temps" | awk -F', ' '{print $1}')
-        local memory_temp=$(echo "$temps" | awk -F', ' '{print $2}')
+    # Get basic temps (GPU and Memory) via CSV query which is fast and reliable
+    local basic_temps
+    basic_temps=$(nvidia-smi --query-gpu=temperature.gpu,temperature.memory --format=csv,noheader,nounits 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ -n "$basic_temps" ]; then
+        # Parse "gpu, memory"
+        gpu_temp=$(echo "$basic_temps" | awk -F', ' '{print $1}')
+        memory_temp=$(echo "$basic_temps" | awk -F', ' '{print $2}')
         
-        # Try to get hotspot temp (not all GPUs support this)
-        local hotspot_temp=$(nvidia-smi --query-gpu=temperature.memory --format=csv,noheader,nounits 2>/dev/null | head -1)
-        
-        # If hotspot query fails, use GPU temp as fallback
-        if [ -z "$hotspot_temp" ] || [ "$hotspot_temp" = "[Not Supported]" ]; then
-            hotspot_temp=$gpu_temp
+        # Try to get hotspot temp via detailed query (TEXT format)
+        # We look for "GPU Hotspot Temperature" in the query output
+        hotspot_temp=$(nvidia-smi -q -d TEMPERATURE 2>/dev/null | grep "GPU Hotspot Temperature" | awk -F': ' '{print $2}' | grep -o '[0-9]*' | head -1)
+
+        # Fallback if hotspot not available or empty
+        if [ -z "$hotspot_temp" ]; then
+             # Some cards don't expose hotspot, or driver is old.
+             # Fallback to GPU temp + offset estimate or just GPU temp? 
+             # Safety: Use GPU temp.
+             hotspot_temp=$gpu_temp
         fi
         
+        # Check if memory temp is supported/valid
+        if [ -z "$memory_temp" ] || [ "$memory_temp" = "[Not Supported]" ]; then
+            memory_temp=$gpu_temp
+        fi
+
         echo "$gpu_temp $hotspot_temp $memory_temp"
     else
         echo "-1 -1 -1"
@@ -188,9 +224,8 @@ get_max_temp() {
     # Get the maximum temperature from all sensors
     # This is what we'll use for fan control decisions
     local temps="$1"
-    local gpu_temp=$(echo "$temps" | awk '{print $1}')
-    local hotspot_temp=$(echo "$temps" | awk '{print $2}')
-    local memory_temp=$(echo "$temps" | awk '{print $3}')
+    # Use read for efficiency instead of awk subshells
+    read -r gpu_temp hotspot_temp memory_temp <<< "$temps"
     
     # Find maximum
     local max_temp=$gpu_temp
@@ -206,7 +241,7 @@ get_max_temp() {
 
 set_fan_speed() {
     local speed_hex=$1
-    local speed_percent=$((16#${speed_hex#0x}))
+    local speed_percent=$(hex_to_dec "$speed_hex")
     
     # Command to set manual fan speed
     ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" \
@@ -285,31 +320,8 @@ calculate_fan_speed_target() {
     echo "$fan_speed"
 }
 
-calculate_fan_speed_with_hysteresis() {
-    # Apply hysteresis: ramp UP immediately, ramp DOWN gradually
-    local temp=$1
-    local current_speed_hex=$2
-    local target_speed_hex=$3
-    
-    # Convert hex to decimal for comparison
-    local current_speed=$((16#${current_speed_hex#0x}))
-    local target_speed=$((16#${target_speed_hex#0x}))
-    
-    if [ "$target_speed" -gt "$current_speed" ]; then
-        # Temperature rising or higher fan needed - respond immediately
-        echo "$target_speed_hex"
-        return 0
-    elif [ "$target_speed" -lt "$current_speed" ]; then
-        # Temperature dropping - check if it's been low long enough
-        # This check happens in the main loop using elapsed time
-        echo "$target_speed_hex"
-        return 1  # Signal that this is a decrease
-    else
-        # No change needed
-        echo "$current_speed_hex"
-        return 2  # Signal no change
-    fi
-}
+# NOTE: Hysteresis logic is implemented inline in the main monitoring loop below.
+# Fans ramp UP immediately and ramp DOWN only after RAMPDOWN_DELAY seconds.
 
 cleanup() {
     log_message "Received termination signal, cleaning up..."
@@ -354,7 +366,7 @@ update_statistics() {
     STATS_TEMP_SUM=$((STATS_TEMP_SUM + gpu_temp))
     
     # Count max fan speed events
-    local fan_speed_dec=$((16#${fan_speed_hex#0x}))
+    local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     if [ "$fan_speed_dec" -ge 90 ]; then
         STATS_MAX_FAN_COUNT=$((STATS_MAX_FAN_COUNT + 1))
     fi
@@ -454,9 +466,7 @@ STATS_REPORT_INTERVAL=3600  # Report statistics every hour
 while true; do
     # Get current GPU temperatures from all sensors
     temps=$(get_gpu_temps)
-    gpu_temp=$(echo "$temps" | awk '{print $1}')
-    hotspot_temp=$(echo "$temps" | awk '{print $2}')
-    memory_temp=$(echo "$temps" | awk '{print $3}')
+    read -r gpu_temp hotspot_temp memory_temp <<< "$temps"
     
     if [ "$gpu_temp" -eq -1 ]; then
         log_message "ERROR: Could not read GPU temperature. Restoring automatic control."
@@ -469,26 +479,18 @@ while true; do
     # Get the maximum temperature across all sensors for fan control
     max_temp=$(get_max_temp "$temps")
     
-    # Log to database for web dashboard (if enabled)
-    if [ -n "$DB_FILE" ] && [ -n "$current_fan_speed" ]; then
-        log_to_database "$gpu_temp" "$hotspot_temp" "$memory_temp" "$max_temp" "$current_fan_speed"
-    fi
-    
-    # Update statistics
-    if [ -n "$current_fan_speed" ]; then
-        update_statistics "$gpu_temp" "$hotspot_temp" "$memory_temp" "$current_fan_speed"
-    fi
+    # Log and stats update moved to end of loop to capture final state
     
     # Calculate target fan speed based on maximum temperature
     target_fan_speed=$(calculate_fan_speed_target "$max_temp")
     
     # Convert hex to decimal for comparison
     if [ -n "$current_fan_speed" ]; then
-        current_speed_dec=$((16#${current_fan_speed#0x}))
+        current_speed_dec=$(hex_to_dec "$current_fan_speed")
     else
         current_speed_dec=0
     fi
-    target_speed_dec=$((16#${target_fan_speed#0x}))
+    target_speed_dec=$(hex_to_dec "$target_fan_speed")
     
     # Determine if we need to change fan speed
     if [ "$target_speed_dec" -gt "$current_speed_dec" ]; then
@@ -560,6 +562,16 @@ while true; do
         fi
         reset_statistics
         last_stats_report=$current_time
+    fi
+
+    # Log to database for web dashboard - AFTER decisions are made so we capture the reaction
+    if [ -n "$DB_FILE" ] && [ -n "$current_fan_speed" ]; then
+        log_to_database "$gpu_temp" "$hotspot_temp" "$memory_temp" "$max_temp" "$current_fan_speed"
+    fi
+     
+    # Update statistics
+    if [ -n "$current_fan_speed" ]; then
+        update_statistics "$gpu_temp" "$hotspot_temp" "$memory_temp" "$current_fan_speed"
     fi
     
     sleep "$CHECK_INTERVAL"
