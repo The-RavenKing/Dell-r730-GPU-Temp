@@ -51,6 +51,11 @@ if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
     GPU_INDEX=$(jq -r '.external.gpu_index // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_INDEX")
 fi
 
+# Keep sane defaults if optional external keys are missing/blank in config.
+if [ -z "$GPU_NAME_FILTER" ]; then
+    GPU_NAME_FILTER="Quadro RTX 4000"
+fi
+
 # Fan speed settings (in hex, 0x00-0x64 = 0-100%)
 FAN_MIN=0x14       # 20% - minimum for airflow
 FAN_LOW=0x1E       # 30% - quiet operation
@@ -239,11 +244,11 @@ get_gpu_metrics() {
             hotspot_temp=$gpu_temp
         fi
 
-        if [ -z "$memory_temp" ] || [ "$memory_temp" = "[Not Supported]" ]; then
+        if [ -z "$memory_temp" ] || [ "$memory_temp" = "N/A" ] || [ "$memory_temp" = "[N/A]" ] || [ "$memory_temp" = "[Not Supported]" ]; then
             memory_temp=$gpu_temp
         fi
 
-        if [ -z "$gpu_fan_pct" ] || [ "$gpu_fan_pct" = "[N/A]" ] || [ "$gpu_fan_pct" = "[Not Supported]" ]; then
+        if [ -z "$gpu_fan_pct" ] || [ "$gpu_fan_pct" = "N/A" ] || [ "$gpu_fan_pct" = "[N/A]" ] || [ "$gpu_fan_pct" = "[Not Supported]" ]; then
             gpu_fan_pct=-1
         fi
 
