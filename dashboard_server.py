@@ -27,7 +27,7 @@ CONFIG_DIR = '/var/lib/dell_gpu_fan_control'
 CONFIG_PATH = os.path.join(CONFIG_DIR, 'config.json')
 DB_PATH = os.path.join(CONFIG_DIR, 'metrics.db')
 PORT = 8080
-HOST = '127.0.0.1'  # Localhost only — nginx handles external access
+HOST = '0.0.0.0'  # Listen on all interfaces by default
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -70,6 +70,11 @@ def load_config():
             print(f"Error loading config: {e}. Using defaults.")
     return DEFAULT_CONFIG.copy()
 
+def get_server_port():
+    """Get port from config or default"""
+    config = load_config()
+    return config.get('dashboard', {}).get('port', PORT)
+
 def save_config(config):
     """Save configuration to JSON file"""
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -83,9 +88,15 @@ def get_config():
     return app._config
 
 # Initialize config and Flask secret key
+# Initialize config
 config = load_config()
-save_config(config)  # Ensure file exists with merged defaults
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+
+# Ensure secret key exists and is persistent
+if 'secret_key' not in config['dashboard']:
+    config['dashboard']['secret_key'] = secrets.token_hex(32)
+    save_config(config)
+
+app.secret_key = config['dashboard']['secret_key']
 app.permanent_session_lifetime = timedelta(hours=24)
 
 def cleanup_database():
@@ -170,6 +181,11 @@ def logout():
 def index():
     """Serve the main dashboard page"""
     return render_template('dashboard.html')
+
+@app.route('/favicon.ico')
+def favicon():
+    """Silence favicon.ico requests"""
+    return '', 204
 
 @app.route('/api/current')
 @login_required
@@ -516,8 +532,9 @@ def update_fan_settings():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    server_port = get_server_port()
     print(f"Starting Dell R730 GPU Fan Control Dashboard")
-    print(f"Dashboard will be available at: http://localhost:{PORT}")
+    print(f"Dashboard will be available at: http://{HOST}:{server_port}")
     print(f"Database: {DB_PATH}")
     
     # Start background cleanup thread
@@ -527,4 +544,4 @@ if __name__ == '__main__':
     
     print(f"\nPress Ctrl+C to stop")
     
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=server_port, debug=False)

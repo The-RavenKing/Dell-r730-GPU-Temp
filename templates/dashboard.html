@@ -333,7 +333,9 @@
                     <button class="time-btn active" onclick="changeRealtimeWindow(60, this)">1h</button>
                 </div>
             </div>
-            <canvas id="realtimeChart" height="80"></canvas>
+            <div style="position: relative; height: 400px; width: 100%">
+                <canvas id="realtimeChart"></canvas>
+            </div>
         </div>
 
         <!-- Historical Chart -->
@@ -346,7 +348,9 @@
                     <button class="time-btn" onclick="changeHistoricalPeriod('30d', this)">30d</button>
                 </div>
             </div>
-            <canvas id="historicalChart" height="80"></canvas>
+            <div style="position: relative; height: 400px; width: 100%">
+                <canvas id="historicalChart"></canvas>
+            </div>
 
             <div id="historicalStats" class="stats-grid">
                 <!-- Stats will be populated by JavaScript -->
@@ -620,6 +624,17 @@
         async function updateEvents() {
             try {
                 const response = await fetch('/api/events/20');
+
+                // Handle non-JSON responses (e.g., redirects to login)
+                const contentType = response.headers.get("content-type");
+                if (!contentType || !contentType.includes("application/json")) {
+                    // Likely a redirect to login page due to expired session
+                    if (response.status === 401 || response.status === 403 || response.redirected) {
+                        window.location.reload();
+                    }
+                    return;
+                }
+
                 const data = await response.json();
 
                 if (data.error) return;

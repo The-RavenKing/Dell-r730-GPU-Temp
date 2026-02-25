@@ -32,6 +32,8 @@ TEMP_HOT=70
 TEMP_CRITICAL=80
 CHECK_INTERVAL=5
 RAMPDOWN_DELAY=20
+GPU_NAME_FILTER="Quadro RTX 4000"
+GPU_INDEX=""
 
 # Load from config.json if available
 if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
@@ -45,6 +47,8 @@ if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
     TEMP_CRITICAL=$(jq -r '.fan_control.temp_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_CRITICAL")
     CHECK_INTERVAL=$(jq -r '.fan_control.check_interval // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHECK_INTERVAL")
     RAMPDOWN_DELAY=$(jq -r '.fan_control.rampdown_delay // empty' "$CONFIG_FILE" 2>/dev/null || echo "$RAMPDOWN_DELAY")
+    GPU_NAME_FILTER=$(jq -r '.external.gpu_name // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_NAME_FILTER")
+    GPU_INDEX=$(jq -r '.external.gpu_index // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_INDEX")
 fi
 
 # Fan speed settings (in hex, 0x00-0x64 = 0-100%)
@@ -181,42 +185,62 @@ log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-get_gpu_temps() {
-    # Get GPU temperatures from multiple sensors
-    # Returns: "gpu_temp hotspot_temp memory_temp" or "-1 -1 -1" if error
+resolve_gpu_index() {
+    # Select the GPU index to monitor (preferred: configured index, then name match, then 0)
+    if [ -n "$GPU_INDEX" ] && [[ "$GPU_INDEX" =~ ^[0-9]+$ ]]; then
+        log_message "Using configured GPU index: $GPU_INDEX"
+        return
+    fi
+
+    local gpu_listing
+    gpu_listing=$($NVIDIA_CMD --query-gpu=index,name --format=csv,noheader 2>/dev/null)
+    if [ -n "$gpu_listing" ]; then
+        GPU_INDEX=$(echo "$gpu_listing" | awk -F', ' -v needle="$GPU_NAME_FILTER" '$2 ~ needle {print $1; exit}')
+        if [ -n "$GPU_INDEX" ]; then
+            log_message "Using GPU index ${GPU_INDEX} (matched name: ${GPU_NAME_FILTER})"
+            return
+        fi
+    fi
+
+    GPU_INDEX=0
+    log_message "No GPU name match for '${GPU_NAME_FILTER}', defaulting to GPU index 0"
+}
+
+get_gpu_metrics() {
+    # Returns: "gpu_temp hotspot_temp memory_temp gpu_fan_pct" or "-1 -1 -1 -1" if error
     local gpu_temp
     local memory_temp
     local hotspot_temp
-    
-    # Get basic temps (GPU and Memory) via CSV query which is fast and reliable
+    local gpu_fan_pct
+
+    # Get basic telemetry (GPU temp, memory temp, onboard fan speed)
     local basic_temps
-    basic_temps=$(nvidia-smi --query-gpu=temperature.gpu,temperature.memory --format=csv,noheader,nounits 2>/dev/null)
-    
+    basic_temps=$($NVIDIA_CMD --id="$GPU_INDEX" --query-gpu=temperature.gpu,temperature.memory,fan.speed --format=csv,noheader,nounits 2>/dev/null)
+
     if [ $? -eq 0 ] && [ -n "$basic_temps" ]; then
-        # Parse "gpu, memory"
+        # Parse "gpu, memory, fan"
         gpu_temp=$(echo "$basic_temps" | awk -F', ' '{print $1}')
         memory_temp=$(echo "$basic_temps" | awk -F', ' '{print $2}')
-        
-        # Try to get hotspot temp via detailed query (TEXT format)
-        # We look for "GPU Hotspot Temperature" in the query output
-        hotspot_temp=$(nvidia-smi -q -d TEMPERATURE 2>/dev/null | grep "GPU Hotspot Temperature" | awk -F': ' '{print $2}' | grep -o '[0-9]*' | head -1)
+        gpu_fan_pct=$(echo "$basic_temps" | awk -F', ' '{print $3}')
 
-        # Fallback if hotspot not available or empty
+        # Try to get hotspot temp via detailed query (TEXT format)
+        hotspot_temp=$($NVIDIA_CMD --id="$GPU_INDEX" -q -d TEMPERATURE 2>/dev/null | grep "GPU Hotspot Temperature" | awk -F': ' '{print $2}' | grep -o '[0-9]*' | head -1)
+
         if [ -z "$hotspot_temp" ]; then
-             # Some cards don't expose hotspot, or driver is old.
-             # Fallback to GPU temp + offset estimate or just GPU temp? 
-             # Safety: Use GPU temp.
-             hotspot_temp=$gpu_temp
+            hotspot_temp=$gpu_temp
         fi
-        
-        # Check if memory temp is supported/valid
+
         if [ -z "$memory_temp" ] || [ "$memory_temp" = "[Not Supported]" ]; then
             memory_temp=$gpu_temp
         fi
 
-        echo "$gpu_temp $hotspot_temp $memory_temp"
+        if [ -z "$gpu_fan_pct" ] || [ "$gpu_fan_pct" = "[N/A]" ] || [ "$gpu_fan_pct" = "[Not Supported]" ]; then
+            gpu_fan_pct=-1
+        fi
+
+        echo "$gpu_temp $hotspot_temp $memory_temp $gpu_fan_pct"
     else
-        echo "-1 -1 -1"
+        echo "-1 -1 -1 -1"
     fi
 }
 
@@ -225,7 +249,7 @@ get_max_temp() {
     # This is what we'll use for fan control decisions
     local temps="$1"
     # Use read for efficiency instead of awk subshells
-    read -r gpu_temp hotspot_temp memory_temp <<< "$temps"
+    read -r gpu_temp hotspot_temp memory_temp gpu_fan_pct <<< "$temps"
     
     # Find maximum
     local max_temp=$gpu_temp
@@ -299,10 +323,11 @@ disable_third_party_pcie_response() {
 }
 
 calculate_fan_speed_target() {
-    # Calculate what the fan speed SHOULD be based purely on temperature
+    # Calculate fan speed target from GPU temperatures and GPU fan load
     local temp=$1
+    local gpu_fan_pct=$2
     local fan_speed
-    
+
     if [ "$temp" -lt "$TEMP_LOW" ]; then
         fan_speed=$FAN_MIN
     elif [ "$temp" -lt "$TEMP_NORMAL" ]; then
@@ -316,7 +341,18 @@ calculate_fan_speed_target() {
     else
         fan_speed=$FAN_MAX
     fi
-    
+
+    # If GPU onboard fan is already working hard, increase chassis airflow proactively.
+    if [ "$gpu_fan_pct" -ge 95 ] 2>/dev/null; then
+        fan_speed=$FAN_MAX
+    elif [ "$gpu_fan_pct" -ge 85 ] 2>/dev/null; then
+        local fan_speed_dec
+        fan_speed_dec=$(hex_to_dec "$fan_speed")
+        if [ "$fan_speed_dec" -lt "$(hex_to_dec "$FAN_HIGH")" ]; then
+            fan_speed=$FAN_HIGH
+        fi
+    fi
+
     echo "$fan_speed"
 }
 
@@ -421,11 +457,50 @@ log_message "=========================================="
 log_message "Dell GPU Fan Controller Starting"
 log_message "=========================================="
 
-# Check if nvidia-smi is available
-if ! command -v nvidia-smi &> /dev/null; then
-    log_message "ERROR: nvidia-smi not found. Please install Nvidia drivers."
-    exit 1
+# Find nvidia telemetry command (systemd environment might have restricted PATH)
+NVIDIA_CMD=""
+
+# 1. Try config.json first
+if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
+    CONFIG_PATH=$(jq -r '.external.nvidia_cmd_path // empty' "$CONFIG_FILE" 2>/dev/null)
+    if [ -z "$CONFIG_PATH" ]; then
+        CONFIG_PATH=$(jq -r '.external.nvidia_smi_path // empty' "$CONFIG_FILE" 2>/dev/null)
+    fi
+    if [ -n "$CONFIG_PATH" ] && [ -x "$CONFIG_PATH" ]; then
+        NVIDIA_CMD="$CONFIG_PATH"
+        log_message "Using configured NVIDIA telemetry command: $NVIDIA_CMD"
+    fi
 fi
+
+# 2. Try default PATH (nvidia-rmi first for compatibility, then nvidia-smi)
+if [ -z "$NVIDIA_CMD" ] && command -v nvidia-rmi &> /dev/null; then
+    NVIDIA_CMD=$(command -v nvidia-rmi)
+fi
+if [ -z "$NVIDIA_CMD" ] && command -v nvidia-smi &> /dev/null; then
+    NVIDIA_CMD=$(command -v nvidia-smi)
+fi
+
+# 3. Check common locations
+if [ -z "$NVIDIA_CMD" ]; then
+    for path in /usr/bin/nvidia-rmi /usr/sbin/nvidia-rmi /usr/local/bin/nvidia-rmi /usr/local/sbin/nvidia-rmi /bin/nvidia-rmi /usr/bin/nvidia-smi /usr/sbin/nvidia-smi /usr/local/bin/nvidia-smi /usr/local/sbin/nvidia-smi /bin/nvidia-smi; do
+        if [ -x "$path" ]; then
+            NVIDIA_CMD="$path"
+            break
+        fi
+    done
+fi
+
+if [ -z "$NVIDIA_CMD" ]; then
+    log_message "ERROR: NVIDIA telemetry command not found (tried nvidia-rmi and nvidia-smi). Please install Nvidia drivers."
+    log_message "       Debug: PATH is $PATH"
+    exit 1
+else
+    if [ -z "$CONFIG_PATH" ]; then
+         log_message "Found NVIDIA telemetry command at: $NVIDIA_CMD"
+    fi
+fi
+
+resolve_gpu_index
 
 # Check if ipmitool is available
 if ! command -v ipmitool &> /dev/null; then
@@ -465,8 +540,8 @@ STATS_REPORT_INTERVAL=3600  # Report statistics every hour
 
 while true; do
     # Get current GPU temperatures from all sensors
-    temps=$(get_gpu_temps)
-    read -r gpu_temp hotspot_temp memory_temp <<< "$temps"
+    metrics=$(get_gpu_metrics)
+    read -r gpu_temp hotspot_temp memory_temp gpu_fan_pct <<< "$metrics"
     
     if [ "$gpu_temp" -eq -1 ]; then
         log_message "ERROR: Could not read GPU temperature. Restoring automatic control."
@@ -477,12 +552,12 @@ while true; do
     fi
     
     # Get the maximum temperature across all sensors for fan control
-    max_temp=$(get_max_temp "$temps")
+    max_temp=$(get_max_temp "$metrics")
     
     # Log and stats update moved to end of loop to capture final state
     
     # Calculate target fan speed based on maximum temperature
-    target_fan_speed=$(calculate_fan_speed_target "$max_temp")
+    target_fan_speed=$(calculate_fan_speed_target "$max_temp" "$gpu_fan_pct")
     
     # Convert hex to decimal for comparison
     if [ -n "$current_fan_speed" ]; then
