@@ -135,12 +135,26 @@ def background_cleanup_task():
         # Sleep for 24 hours
         time.sleep(86400)
 
+def ensure_database_schema(conn):
+    """Ensure expected columns exist for backward compatibility"""
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(temperature_readings)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if 'gpu_fan_pct' not in columns:
+        cursor.execute("ALTER TABLE temperature_readings ADD COLUMN gpu_fan_pct INTEGER NOT NULL DEFAULT -1")
+        conn.commit()
+
+
 def get_db_connection():
     """Create a database connection"""
     if not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    try:
+        ensure_database_schema(conn)
+    except Exception as e:
+        print(f"Schema migration warning: {e}")
     return conn
 
 def login_required(f):
@@ -200,7 +214,7 @@ def api_current():
         
         # Get latest reading
         cursor.execute('''
-            SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed
+            SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct
             FROM temperature_readings
             ORDER BY timestamp DESC
             LIMIT 1
@@ -217,7 +231,8 @@ def api_current():
             'hotspot_temp': row['hotspot_temp'],
             'memory_temp': row['memory_temp'],
             'max_temp': row['max_temp'],
-            'fan_speed': row['fan_speed']
+            'fan_speed': row['fan_speed'],
+            'gpu_fan_pct': row['gpu_fan_pct']
         }
         
         return jsonify(data)
@@ -241,7 +256,7 @@ def api_realtime(minutes=60):
         cutoff_time = int((datetime.now() - timedelta(minutes=minutes)).timestamp())
         
         cursor.execute('''
-            SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed
+            SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct
             FROM temperature_readings
             WHERE timestamp > ?
             ORDER BY timestamp ASC
@@ -255,7 +270,8 @@ def api_realtime(minutes=60):
             'hotspot_temps': [row['hotspot_temp'] for row in rows],
             'memory_temps': [row['memory_temp'] for row in rows],
             'max_temps': [row['max_temp'] for row in rows],
-            'fan_speeds': [row['fan_speed'] for row in rows]
+            'fan_speeds': [row['fan_speed'] for row in rows],
+            'gpu_fan_pcts': [row['gpu_fan_pct'] for row in rows]
         }
         
         return jsonify(data)

@@ -317,9 +317,15 @@
             </div>
 
             <div class="card">
-                <div class="card-title">Fan Speed</div>
+                <div class="card-title">Chassis Fan</div>
                 <div class="card-value" id="fanSpeed">--<span class="card-unit">%</span></div>
-                <div class="card-subtitle">Current Fan RPM</div>
+                <div class="card-subtitle">IPMI Manual Setting</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">GPU Fan</div>
+                <div class="card-value" id="gpuFanPct">--<span class="card-unit">%</span></div>
+                <div class="card-subtitle">Onboard GPU Fan</div>
             </div>
         </div>
 
@@ -506,6 +512,11 @@
                 document.getElementById('hotspotTemp').innerHTML = `${data.hotspot_temp}<span class="card-unit">°C</span>`;
                 document.getElementById('memoryTemp').innerHTML = `${data.memory_temp}<span class="card-unit">°C</span>`;
                 document.getElementById('fanSpeed').innerHTML = `${data.fan_speed}<span class="card-unit">%</span>`;
+                if (typeof data.gpu_fan_pct === 'number' && data.gpu_fan_pct >= 0) {
+                    document.getElementById('gpuFanPct').innerHTML = `${data.gpu_fan_pct}<span class="card-unit">%</span>`;
+                } else {
+                    document.getElementById('gpuFanPct').innerHTML = 'N/A<span class="card-unit"></span>';
+                }
 
                 document.getElementById('lastUpdate').textContent = `Last update: ${data.datetime}`;
 

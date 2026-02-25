@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS temperature_readings (
     hotspot_temp INTEGER NOT NULL,
     memory_temp INTEGER NOT NULL,
     max_temp INTEGER NOT NULL,
-    fan_speed INTEGER NOT NULL
+    fan_speed INTEGER NOT NULL,
+    gpu_fan_pct INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE TABLE IF NOT EXISTS fan_events (
@@ -119,6 +120,13 @@ CREATE INDEX IF NOT EXISTS idx_temp_timestamp ON temperature_readings(timestamp)
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON fan_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_stats_period ON statistics(period_start, period_end);
 EOF
+
+    # Add new columns on existing databases without dropping history
+    local has_gpu_fan_column
+    has_gpu_fan_column=$(sqlite3 "$DB_FILE" "PRAGMA table_info(temperature_readings);" | grep -c '|gpu_fan_pct|')
+    if [ "$has_gpu_fan_column" -eq 0 ]; then
+        sqlite3 "$DB_FILE" "ALTER TABLE temperature_readings ADD COLUMN gpu_fan_pct INTEGER NOT NULL DEFAULT -1;"
+    fi
     
     if [ $? -eq 0 ]; then
         log_message "Database initialized at $DB_FILE"
@@ -138,12 +146,13 @@ log_to_database() {
     local hotspot_temp=$2
     local memory_temp=$3
     local max_temp=$4
-    local fan_speed_hex=$5
+    local gpu_fan_pct=$5
+    local fan_speed_hex=$6
     local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     
     sqlite3 "$DB_FILE" <<EOF
-INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed)
-VALUES ($timestamp, $gpu_temp, $hotspot_temp, $memory_temp, $max_temp, $fan_speed_dec);
+INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct)
+VALUES ($timestamp, $gpu_temp, $hotspot_temp, $memory_temp, $max_temp, $fan_speed_dec, $gpu_fan_pct);
 EOF
 }
 
@@ -641,7 +650,7 @@ while true; do
 
     # Log to database for web dashboard - AFTER decisions are made so we capture the reaction
     if [ -n "$DB_FILE" ] && [ -n "$current_fan_speed" ]; then
-        log_to_database "$gpu_temp" "$hotspot_temp" "$memory_temp" "$max_temp" "$current_fan_speed"
+        log_to_database "$gpu_temp" "$hotspot_temp" "$memory_temp" "$max_temp" "$gpu_fan_pct" "$current_fan_speed"
     fi
      
     # Update statistics
