@@ -64,7 +64,8 @@ DEFAULT_CONFIG = {
         'gpu_fan_normal': 55,
         'gpu_fan_warm': 65,
         'gpu_fan_hot': 80,
-        'gpu_fan_critical': 95
+        'gpu_fan_critical': 95,
+        'gpu_fan_priority_margin': 20
     }
 }
 
@@ -211,7 +212,8 @@ def logout():
 @login_required
 def index():
     """Serve the main dashboard page"""
-    return render_template('dashboard.html')
+    config = get_config()
+    return render_template('dashboard.html', config=config)
 
 @app.route('/favicon.ico')
 def favicon():
@@ -573,6 +575,7 @@ def update_fan_settings():
 
         gpu_fields = {
             'gpu_fan_target': (0, 15, 'GPU fan target index'),
+            'gpu_fan_priority_margin': (0, 50, 'GPU fan priority margin'),
             'gpu_fan_min': (20, 100, 'GPU fan min'),
             'gpu_fan_low': (20, 100, 'GPU fan low'),
             'gpu_fan_normal': (20, 100, 'GPU fan normal'),

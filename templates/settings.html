@@ -263,6 +263,40 @@
             box-shadow: 0 8px 20px rgba(53, 196, 255, 0.23);
         }
 
+        .profile-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .profile-btn {
+            border: 1px solid var(--line);
+            border-radius: 11px;
+            background: rgba(6, 21, 31, 0.72);
+            color: var(--text);
+            font: inherit;
+            font-size: .82rem;
+            font-weight: 700;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: .2s ease;
+            text-align: left;
+        }
+
+        .profile-btn:hover {
+            border-color: rgba(53, 196, 255, 0.7);
+            box-shadow: 0 8px 20px rgba(53, 196, 255, 0.18);
+        }
+
+        .profile-btn .sub {
+            display: block;
+            margin-top: 4px;
+            font-size: .72rem;
+            font-weight: 500;
+            color: var(--muted);
+        }
+
         .toast {
             position: fixed;
             right: 20px;
@@ -374,6 +408,22 @@
             <h2 class="section-title">Fan and Thermal Strategy</h2>
             <div class="warning-text">Thresholds must stay ordered from low to critical. Restart `dell-gpu-fan-control` to apply.</div>
 
+            <label style="display:block;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Quick Profiles</label>
+            <div class="profile-row">
+                <button class="profile-btn" type="button" onclick="applyThermalProfile('quiet')">
+                    Quiet
+                    <span class="sub">Lower fan aggression for noise-sensitive runs</span>
+                </button>
+                <button class="profile-btn" type="button" onclick="applyThermalProfile('balanced')">
+                    Balanced (Recommended)
+                    <span class="sub">Good thermal headroom with controlled noise</span>
+                </button>
+                <button class="profile-btn" type="button" onclick="applyThermalProfile('aggressive')">
+                    Aggressive
+                    <span class="sub">Prioritizes cooling over acoustics</span>
+                </button>
+            </div>
+
             <label style="display:block;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Temperature Thresholds</label>
             <div class="threshold-grid">
                 <div class="threshold-card"><label for="tempLow">Low</label><input type="number" id="tempLow" value="{{ config.fan_control.temp_low }}"><span class="unit">C</span></div>
@@ -429,7 +479,12 @@
                     <div class="hint">Usually 0 for single-fan cards</div>
                 </div>
             </div>
-            <div class="form-row single">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="gpuFanPriorityMargin">GPU Priority Margin</label>
+                    <input type="number" id="gpuFanPriorityMargin" value="{{ config.external.gpu_fan_priority_margin | default(20) }}" min="0" max="50">
+                    <div class="hint">Minimum % lead GPU target keeps above chassis target</div>
+                </div>
                 <div class="form-group">
                     <label for="gpuFanXauthority">XAUTHORITY (Optional)</label>
                     <input type="text" id="gpuFanXauthority" value="{{ config.external.gpu_fan_xauthority | default('') }}" placeholder="/home/karl/.Xauthority">
@@ -453,11 +508,99 @@
     <div class="toast" id="toast"></div>
 
     <script>
+        const THERMAL_PROFILES = {
+            quiet: {
+                temp_low: 42,
+                temp_normal: 52,
+                temp_warm: 64,
+                temp_hot: 74,
+                temp_critical: 82,
+                check_interval: 6,
+                rampdown_delay: 35,
+                sustained_hot_checks: 9,
+                gpu_fan_priority_margin: 15,
+                gpu_fan_min: 30,
+                gpu_fan_low: 38,
+                gpu_fan_normal: 48,
+                gpu_fan_warm: 58,
+                gpu_fan_hot: 72,
+                gpu_fan_critical: 88
+            },
+            balanced: {
+                temp_low: 40,
+                temp_normal: 50,
+                temp_warm: 60,
+                temp_hot: 70,
+                temp_critical: 80,
+                check_interval: 5,
+                rampdown_delay: 20,
+                sustained_hot_checks: 6,
+                gpu_fan_priority_margin: 20,
+                gpu_fan_min: 35,
+                gpu_fan_low: 45,
+                gpu_fan_normal: 55,
+                gpu_fan_warm: 65,
+                gpu_fan_hot: 80,
+                gpu_fan_critical: 95
+            },
+            aggressive: {
+                temp_low: 36,
+                temp_normal: 44,
+                temp_warm: 52,
+                temp_hot: 62,
+                temp_critical: 72,
+                check_interval: 3,
+                rampdown_delay: 15,
+                sustained_hot_checks: 3,
+                gpu_fan_priority_margin: 25,
+                gpu_fan_min: 45,
+                gpu_fan_low: 55,
+                gpu_fan_normal: 65,
+                gpu_fan_warm: 75,
+                gpu_fan_hot: 90,
+                gpu_fan_critical: 100
+            }
+        };
+
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
             toast.textContent = (type === 'success' ? 'Saved: ' : 'Error: ') + message;
             toast.className = 'toast ' + type + ' show';
             setTimeout(() => toast.classList.remove('show'), 4200);
+        }
+
+        function setNumericField(id, value) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.value = String(value);
+            }
+        }
+
+        function applyThermalProfile(profileName) {
+            const profile = THERMAL_PROFILES[profileName];
+            if (!profile) {
+                showToast('Unknown profile: ' + profileName, 'error');
+                return;
+            }
+
+            setNumericField('tempLow', profile.temp_low);
+            setNumericField('tempNormal', profile.temp_normal);
+            setNumericField('tempWarm', profile.temp_warm);
+            setNumericField('tempHot', profile.temp_hot);
+            setNumericField('tempCritical', profile.temp_critical);
+            setNumericField('checkInterval', profile.check_interval);
+            setNumericField('rampdownDelay', profile.rampdown_delay);
+            setNumericField('sustainedHotChecks', profile.sustained_hot_checks);
+            setNumericField('gpuFanPriorityMargin', profile.gpu_fan_priority_margin);
+            setNumericField('gpuFanMin', profile.gpu_fan_min);
+            setNumericField('gpuFanLow', profile.gpu_fan_low);
+            setNumericField('gpuFanNormal', profile.gpu_fan_normal);
+            setNumericField('gpuFanWarm', profile.gpu_fan_warm);
+            setNumericField('gpuFanHot', profile.gpu_fan_hot);
+            setNumericField('gpuFanCritical', profile.gpu_fan_critical);
+
+            showToast(`Applied ${profileName} profile. Saving...`, 'success');
+            saveFanSettings();
         }
 
         async function saveCredentials() {
@@ -541,6 +684,7 @@
                 gpu_fan_display: document.getElementById('gpuFanDisplay').value,
                 gpu_fan_xauthority: document.getElementById('gpuFanXauthority').value,
                 gpu_fan_target: document.getElementById('gpuFanTarget').value,
+                gpu_fan_priority_margin: document.getElementById('gpuFanPriorityMargin').value,
                 gpu_fan_min: document.getElementById('gpuFanMin').value,
                 gpu_fan_low: document.getElementById('gpuFanLow').value,
                 gpu_fan_normal: document.getElementById('gpuFanNormal').value,

@@ -45,6 +45,7 @@ GPU_FAN_NORMAL=55
 GPU_FAN_WARM=65
 GPU_FAN_HOT=80
 GPU_FAN_CRITICAL=95
+GPU_FAN_PRIORITY_MARGIN=20
 
 # Load from config.json if available
 if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
@@ -71,6 +72,7 @@ if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
     GPU_FAN_WARM=$(jq -r '.external.gpu_fan_warm // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_WARM")
     GPU_FAN_HOT=$(jq -r '.external.gpu_fan_hot // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_HOT")
     GPU_FAN_CRITICAL=$(jq -r '.external.gpu_fan_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_CRITICAL")
+    GPU_FAN_PRIORITY_MARGIN=$(jq -r '.external.gpu_fan_priority_margin // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_PRIORITY_MARGIN")
 fi
 
 # Keep sane defaults if optional external keys are missing/blank in config.
@@ -85,6 +87,14 @@ if ! [[ "$GPU_FAN_TARGET" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$SUSTAINED_HOT_CHECKS" =~ ^[0-9]+$ ]] || [ "$SUSTAINED_HOT_CHECKS" -lt 1 ]; then
     SUSTAINED_HOT_CHECKS=6
+fi
+if ! [[ "$GPU_FAN_PRIORITY_MARGIN" =~ ^[0-9]+$ ]]; then
+    GPU_FAN_PRIORITY_MARGIN=20
+fi
+if [ "$GPU_FAN_PRIORITY_MARGIN" -lt 0 ]; then
+    GPU_FAN_PRIORITY_MARGIN=0
+elif [ "$GPU_FAN_PRIORITY_MARGIN" -gt 50 ]; then
+    GPU_FAN_PRIORITY_MARGIN=50
 fi
 
 # Fan speed settings (in hex, 0x00-0x64 = 0-100%)
@@ -580,6 +590,49 @@ calculate_fan_speed_target() {
     echo "$fan_speed"
 }
 
+enforce_gpu_priority_policy() {
+    # GPU-first policy: raise GPU fan target above chassis demand and cap chassis in lower bands.
+    local temp=$1
+    local gpu_target_pct=$2
+    local chassis_speed_hex=$3
+    local chassis_speed_dec
+    local chassis_cap_hex=""
+    local min_gpu_target
+
+    chassis_speed_dec=$(hex_to_dec "$chassis_speed_hex")
+
+    if [ "$temp" -lt "$TEMP_NORMAL" ]; then
+        chassis_cap_hex=$FAN_MIN
+    elif [ "$temp" -lt "$TEMP_WARM" ]; then
+        chassis_cap_hex=$FAN_LOW
+    elif [ "$temp" -lt "$TEMP_HOT" ]; then
+        chassis_cap_hex=$FAN_NORMAL
+    fi
+
+    if [ -n "$chassis_cap_hex" ] && [ "$chassis_speed_dec" -gt "$(hex_to_dec "$chassis_cap_hex")" ]; then
+        chassis_speed_hex=$chassis_cap_hex
+        chassis_speed_dec=$(hex_to_dec "$chassis_speed_hex")
+    fi
+
+    min_gpu_target=$((chassis_speed_dec + GPU_FAN_PRIORITY_MARGIN))
+    if [ "$min_gpu_target" -gt 100 ]; then
+        min_gpu_target=100
+    fi
+
+    if [ "$gpu_target_pct" -lt "$min_gpu_target" ]; then
+        gpu_target_pct=$min_gpu_target
+    fi
+
+    if [ "$temp" -ge "$TEMP_WARM" ] && [ "$gpu_target_pct" -lt "$GPU_FAN_WARM" ]; then
+        gpu_target_pct=$GPU_FAN_WARM
+    fi
+    if [ "$temp" -ge "$TEMP_HOT" ] && [ "$gpu_target_pct" -lt "$GPU_FAN_HOT" ]; then
+        gpu_target_pct=$GPU_FAN_HOT
+    fi
+
+    echo "$gpu_target_pct $chassis_speed_hex"
+}
+
 # NOTE: Hysteresis logic is implemented inline in the main monitoring loop below.
 # Fans ramp UP immediately and ramp DOWN only after RAMPDOWN_DELAY seconds.
 
@@ -759,6 +812,7 @@ log_message "Monitoring: GPU core, hotspot, and memory temperatures"
 log_message "Hysteresis enabled: Fans ramp UP immediately, ramp DOWN after ${RAMPDOWN_DELAY}s"
 if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
     log_message "GPU fan assist active (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
+    log_message "GPU-first policy active (GPU target maintained at least ${GPU_FAN_PRIORITY_MARGIN}% above chassis target where possible)"
 else
     log_message "GPU fan assist inactive; chassis fan control only"
 fi
@@ -793,11 +847,14 @@ while true; do
     target_gpu_fan_pct=-1
     if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
         target_gpu_fan_pct=$(calculate_gpu_fan_target "$max_temp")
-        set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
     fi
 
     # Layer 2: chassis target based on temps and GPU fan behavior.
     target_fan_speed=$(calculate_fan_speed_target "$max_temp" "$gpu_fan_pct" "$target_gpu_fan_pct")
+
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        read -r target_gpu_fan_pct target_fan_speed <<< "$(enforce_gpu_priority_policy "$max_temp" "$target_gpu_fan_pct" "$target_fan_speed")"
+    fi
 
     # Layer 3: sustained-heat safety override.
     if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
@@ -805,7 +862,6 @@ while true; do
         target_fan_speed=$FAN_MAX
         if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
             target_gpu_fan_pct=$GPU_FAN_CRITICAL
-            set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
         fi
     elif [ "$max_temp" -ge "$TEMP_HOT" ]; then
         hot_streak_count=$((hot_streak_count + 1))
@@ -815,11 +871,14 @@ while true; do
             fi
             if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ] && [ "$target_gpu_fan_pct" -lt "$GPU_FAN_HOT" ]; then
                 target_gpu_fan_pct=$GPU_FAN_HOT
-                set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
             fi
         fi
     else
         hot_streak_count=0
+    fi
+
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
     fi
 
     # Convert hex to decimal for comparison

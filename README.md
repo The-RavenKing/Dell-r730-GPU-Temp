@@ -8,6 +8,7 @@ This script provides dynamic fan control for Dell PowerEdge R730 servers with Nv
 - **Multi-sensor monitoring** - tracks GPU core, hotspot, and memory temperatures
 - **Intelligent fan control** - uses the highest temperature reading for safety
 - **Layered cooling strategy** - GPU fan assist first, chassis fan second, sustained-heat safety escalation
+- **GPU-first cooling policy** - with GPU fan assist active, GPU fan target is kept ahead of chassis target before chassis ramps harder
 - **Hysteresis logic** - fans ramp UP immediately when temp rises, ramp DOWN gradually when temp drops
 - **Prevents fan oscillation** during the bursty load patterns typical of LLM work
 - **Statistics tracking** - monitors peak temps, fan usage, and provides hourly summaries
@@ -130,7 +131,8 @@ Config keys (in `/var/lib/dell_gpu_fan_control/config.json` under `external`):
   "gpu_fan_normal": 55,
   "gpu_fan_warm": 65,
   "gpu_fan_hot": 80,
-  "gpu_fan_critical": 95
+  "gpu_fan_critical": 95,
+  "gpu_fan_priority_margin": 20
 }
 ```
 

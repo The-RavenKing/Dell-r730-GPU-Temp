@@ -108,6 +108,45 @@
             font-size: .84rem;
         }
 
+        .chip-btn {
+            color: var(--text);
+            font-family: inherit;
+            cursor: pointer;
+            transition: .2s ease;
+        }
+
+        .chip-btn:hover {
+            border-color: rgba(53, 196, 255, 0.7);
+            box-shadow: 0 6px 20px rgba(53, 196, 255, 0.18);
+        }
+
+        .thermal-chip {
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+            padding-inline: 13px;
+        }
+
+        .risk-normal {
+            border-color: rgba(56, 211, 159, 0.5);
+            color: #abefd7;
+        }
+
+        .risk-warm {
+            border-color: rgba(255, 210, 124, 0.5);
+            color: #ffe1a6;
+        }
+
+        .risk-hot {
+            border-color: rgba(255, 171, 103, 0.55);
+            color: #ffcf9e;
+        }
+
+        .risk-critical {
+            border-color: rgba(255, 108, 108, 0.62);
+            color: #ffc2c2;
+        }
+
         .status-dot {
             width: 9px;
             height: 9px;
@@ -347,6 +386,30 @@
             white-space: nowrap;
         }
 
+        body.compact-mode .topbar {
+            padding: 14px 16px;
+        }
+
+        body.compact-mode .section {
+            padding: 14px;
+        }
+
+        body.compact-mode .metric-card {
+            padding: 12px;
+        }
+
+        body.compact-mode .metric-value {
+            font-size: clamp(1.45rem, 3vw, 1.95rem);
+        }
+
+        body.compact-mode .chart-wrap {
+            height: 280px;
+        }
+
+        body.compact-mode .events-container {
+            max-height: 250px;
+        }
+
         @media (max-width: 900px) {
             body {
                 padding: 14px;
@@ -380,7 +443,9 @@
                     <span class="status-dot"></span>
                     <span>Monitoring Active</span>
                 </div>
+                <div class="chip thermal-chip risk-normal" id="thermalRisk">Risk: Normal</div>
                 <div class="chip" id="lastUpdate">Last update: --</div>
+                <button class="chip chip-btn" id="compactToggle" type="button" onclick="toggleCompactMode()">Compact: Off</button>
                 <a class="btn-link" href="/settings">Settings</a>
                 <a class="btn-link" href="/logout">Logout</a>
             </div>
@@ -454,6 +519,53 @@
         let historicalChart = null;
         let currentRealtimeWindow = 60;
         let currentHistoricalPeriod = '24h';
+        const fanThresholds = {
+            temp_warm: Number('{{ config.fan_control.temp_warm if config and config.fan_control else 60 }}'),
+            temp_hot: Number('{{ config.fan_control.temp_hot if config and config.fan_control else 70 }}'),
+            temp_critical: Number('{{ config.fan_control.temp_critical if config and config.fan_control else 80 }}')
+        };
+        let compactMode = false;
+
+        function setThermalRisk(maxTemp) {
+            const badge = document.getElementById('thermalRisk');
+            if (!badge || typeof maxTemp !== 'number') return;
+
+            let label = 'Normal';
+            let className = 'risk-normal';
+
+            if (maxTemp >= fanThresholds.temp_critical) {
+                label = 'Critical';
+                className = 'risk-critical';
+            } else if (maxTemp >= fanThresholds.temp_hot) {
+                label = 'Hot';
+                className = 'risk-hot';
+            } else if (maxTemp >= fanThresholds.temp_warm) {
+                label = 'Warm';
+                className = 'risk-warm';
+            }
+
+            badge.className = `chip thermal-chip ${className}`;
+            badge.textContent = `Risk: ${label}`;
+        }
+
+        function applyCompactMode(enabled) {
+            compactMode = !!enabled;
+            document.body.classList.toggle('compact-mode', compactMode);
+            localStorage.setItem('gpuDashboardCompactMode', compactMode ? '1' : '0');
+            const compactToggle = document.getElementById('compactToggle');
+            if (compactToggle) {
+                compactToggle.textContent = compactMode ? 'Compact: On' : 'Compact: Off';
+            }
+        }
+
+        function toggleCompactMode() {
+            applyCompactMode(!compactMode);
+        }
+
+        function initCompactMode() {
+            const saved = localStorage.getItem('gpuDashboardCompactMode');
+            applyCompactMode(saved === '1');
+        }
 
         function chartBaseOptions(yLabel) {
             return {
@@ -591,6 +703,7 @@
 
                 document.getElementById('lastUpdate').textContent = `Last update: ${data.datetime}`;
                 updateStatus(true, data.timestamp);
+                setThermalRisk(Number(data.max_temp));
                 hideError();
             } catch (error) {
                 showError('Failed to fetch current data: ' + error.message);
@@ -725,6 +838,7 @@
         }
 
         window.addEventListener('load', () => {
+            initCompactMode();
             initCharts();
             updateCurrent();
             updateRealtimeChart();

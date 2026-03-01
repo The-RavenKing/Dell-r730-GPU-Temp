@@ -186,7 +186,8 @@ cat > /tmp/config.defaults.json <<EOF
     "gpu_fan_normal": 55,
     "gpu_fan_warm": 65,
     "gpu_fan_hot": 80,
-    "gpu_fan_critical": 95
+    "gpu_fan_critical": 95,
+    "gpu_fan_priority_margin": 20
   }
 }
 EOF
