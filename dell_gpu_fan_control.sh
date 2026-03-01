@@ -813,6 +813,7 @@ log_message "Hysteresis enabled: Fans ramp UP immediately, ramp DOWN after ${RAM
 if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
     log_message "GPU fan assist active (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
     log_message "GPU-first policy active (GPU target maintained at least ${GPU_FAN_PRIORITY_MARGIN}% above chassis target where possible)"
+    log_message "GPU hot latch policy active (HOT/CRITICAL holds GPU fan at 100% until below ${TEMP_NORMAL}C)"
 else
     log_message "GPU fan assist inactive; chassis fan control only"
 fi
@@ -821,6 +822,7 @@ current_fan_speed=""
 pending_decrease_speed=""
 decrease_pending_since=0
 hot_streak_count=0
+gpu_hot_latch=0
 reset_statistics
 last_stats_report=$(date +%s)
 STATS_REPORT_INTERVAL=3600  # Report statistics every hour
@@ -840,6 +842,18 @@ while true; do
     
     # Get the maximum temperature across all sensors for fan control
     max_temp=$(get_max_temp "$metrics")
+
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        if [ "$gpu_hot_latch" -eq 0 ] && [ "$max_temp" -ge "$TEMP_HOT" ]; then
+            gpu_hot_latch=1
+            log_message "GPU hot latch engaged at ${max_temp}C; holding GPU fan at 100% until below ${TEMP_NORMAL}C"
+        elif [ "$gpu_hot_latch" -eq 1 ] && [ "$max_temp" -lt "$TEMP_NORMAL" ]; then
+            gpu_hot_latch=0
+            log_message "GPU hot latch released at ${max_temp}C; returning GPU fan to dynamic profile"
+        fi
+    else
+        gpu_hot_latch=0
+    fi
     
     # Log and stats update moved to end of loop to capture final state
     
@@ -875,6 +889,10 @@ while true; do
         fi
     else
         hot_streak_count=0
+    fi
+
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ] && [ "$gpu_hot_latch" -eq 1 ]; then
+        target_gpu_fan_pct=100
     fi
 
     if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then

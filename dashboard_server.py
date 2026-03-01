@@ -9,7 +9,7 @@ Port: 8080 (configurable)
 Database: /var/lib/dell_gpu_fan_control/metrics.db
 """
 
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, Response
 import sqlite3
 import os
 import json
@@ -17,6 +17,8 @@ import threading
 import time
 import hashlib
 import secrets
+import csv
+import io
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -26,6 +28,7 @@ app = Flask(__name__)
 CONFIG_DIR = '/var/lib/dell_gpu_fan_control'
 CONFIG_PATH = os.path.join(CONFIG_DIR, 'config.json')
 DB_PATH = os.path.join(CONFIG_DIR, 'metrics.db')
+LOG_PATH = '/var/log/dell_gpu_fan_control.log'
 PORT = 8080
 HOST = '0.0.0.0'  # Listen on all interfaces by default
 
@@ -174,6 +177,22 @@ def get_db_connection():
     except Exception as e:
         print(f"Schema migration warning: {e}")
     return conn
+
+
+def period_to_cutoff(period):
+    """Convert an export period into a UNIX timestamp cutoff."""
+    period_map = {
+        '1h': 1,
+        '6h': 6,
+        '24h': 24,
+        '7d': 24 * 7,
+        '30d': 24 * 30
+    }
+    if period == 'all':
+        return None
+    if period not in period_map:
+        return None
+    return int((datetime.now() - timedelta(hours=period_map[period])).timestamp())
 
 def login_required(f):
     """Decorator to require authentication for routes"""
@@ -458,6 +477,170 @@ def api_statistics():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
+
+
+@app.route('/api/export/temperature.csv')
+@login_required
+def export_temperature_csv():
+    """Download raw temperature readings as CSV."""
+    period = request.args.get('period', '24h')
+    cutoff = period_to_cutoff(period)
+    if period != 'all' and cutoff is None:
+        return jsonify({'error': 'Invalid period. Valid: 1h, 6h, 24h, 7d, 30d, all'}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database not found'}), 404
+
+    try:
+        cursor = conn.cursor()
+        if cutoff is None:
+            cursor.execute('''
+                SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct
+                FROM temperature_readings
+                ORDER BY timestamp ASC
+            ''')
+        else:
+            cursor.execute('''
+                SELECT timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct
+                FROM temperature_readings
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC
+            ''', (cutoff,))
+
+        rows = cursor.fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            'timestamp',
+            'datetime',
+            'gpu_temp_c',
+            'hotspot_temp_c',
+            'memory_temp_c',
+            'max_temp_c',
+            'chassis_fan_percent',
+            'gpu_fan_percent'
+        ])
+        for row in rows:
+            writer.writerow([
+                row['timestamp'],
+                datetime.fromtimestamp(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S'),
+                row['gpu_temp'],
+                row['hotspot_temp'],
+                row['memory_temp'],
+                row['max_temp'],
+                row['fan_speed'],
+                row['gpu_fan_pct']
+            ])
+
+        timestamp_label = datetime.now().strftime('%Y%m%d_%H%M%S')
+        response = Response(output.getvalue(), mimetype='text/csv')
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename=temperature_readings_{period}_{timestamp_label}.csv'
+        )
+        return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/export/fan-events.csv')
+@login_required
+def export_fan_events_csv():
+    """Download fan events as CSV."""
+    max_rows = 50000
+    limit_param = request.args.get('limit', str(max_rows))
+    try:
+        limit = int(limit_param)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit must be a number'}), 400
+    limit = min(max(limit, 1), max_rows)
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database not found'}), 404
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT timestamp, event_type, temperature, fan_speed, details
+            FROM fan_events
+            ORDER BY timestamp ASC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            'timestamp',
+            'datetime',
+            'event_type',
+            'temperature_c',
+            'chassis_fan_percent',
+            'details'
+        ])
+        for row in rows:
+            writer.writerow([
+                row['timestamp'],
+                datetime.fromtimestamp(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S'),
+                row['event_type'],
+                row['temperature'],
+                row['fan_speed'],
+                row['details']
+            ])
+
+        timestamp_label = datetime.now().strftime('%Y%m%d_%H%M%S')
+        response = Response(output.getvalue(), mimetype='text/csv')
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename=fan_events_{timestamp_label}.csv'
+        )
+        return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/export/metrics-db')
+@login_required
+def export_metrics_db():
+    """Download the raw SQLite metrics database."""
+    if not os.path.exists(DB_PATH):
+        return jsonify({'error': 'Database not found'}), 404
+
+    try:
+        with open(DB_PATH, 'rb') as f:
+            payload = f.read()
+        timestamp_label = datetime.now().strftime('%Y%m%d_%H%M%S')
+        response = Response(payload, mimetype='application/octet-stream')
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename=metrics_{timestamp_label}.db'
+        )
+        return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/log.txt')
+@login_required
+def export_log_txt():
+    """Download the fan control plain-text log."""
+    if not os.path.exists(LOG_PATH):
+        return jsonify({'error': f'Log file not found at {LOG_PATH}'}), 404
+
+    try:
+        with open(LOG_PATH, 'r', encoding='utf-8', errors='replace') as f:
+            payload = f.read()
+        timestamp_label = datetime.now().strftime('%Y%m%d_%H%M%S')
+        response = Response(payload, mimetype='text/plain; charset=utf-8')
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename=dell_gpu_fan_control_{timestamp_label}.log'
+        )
+        return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/settings')
 @login_required

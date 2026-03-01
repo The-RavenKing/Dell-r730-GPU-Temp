@@ -206,6 +206,17 @@ sudo journalctl -u dell-gpu-fan-control.service -f
 sudo tail -f /var/log/dell_gpu_fan_control.log
 ```
 
+### 6b. Export Logs and Metrics for Analysis
+
+You can download machine-readable data from the Settings page (`Logs and Data Export`) after logging into the dashboard.
+
+Direct endpoints:
+
+- `/api/export/temperature.csv?period=24h` (`period`: `1h`, `6h`, `24h`, `7d`, `30d`, `all`)
+- `/api/export/fan-events.csv?limit=5000`
+- `/api/export/log.txt`
+- `/api/export/metrics-db`
+
 ### 7. Set Up Web Dashboard (Optional but Recommended!)
 
 The web dashboard provides a beautiful real-time interface to monitor your GPU temperatures and fan speeds from any device on your network.
