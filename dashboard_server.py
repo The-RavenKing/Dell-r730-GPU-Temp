@@ -47,7 +47,24 @@ DEFAULT_CONFIG = {
         'temp_hot': 70,
         'temp_critical': 80,
         'check_interval': 5,
-        'rampdown_delay': 20
+        'rampdown_delay': 20,
+        'sustained_hot_checks': 6
+    },
+    'external': {
+        'nvidia_smi_path': '',
+        'nvidia_settings_path': '',
+        'gpu_name': 'Quadro RTX 4000',
+        'gpu_index': '',
+        'gpu_fan_control_enabled': False,
+        'gpu_fan_display': ':1',
+        'gpu_fan_xauthority': '',
+        'gpu_fan_target': 0,
+        'gpu_fan_min': 35,
+        'gpu_fan_low': 45,
+        'gpu_fan_normal': 55,
+        'gpu_fan_warm': 65,
+        'gpu_fan_hot': 80,
+        'gpu_fan_critical': 95
     }
 }
 
@@ -515,7 +532,7 @@ def update_fan_settings():
         data = request.get_json()
         config = get_config()
         
-        # Validate and update temperature thresholds
+        # Validate and update core fan-control thresholds
         fields = {
             'temp_low': (20, 50, 'Low temp threshold'),
             'temp_normal': (30, 60, 'Normal temp threshold'),
@@ -523,7 +540,8 @@ def update_fan_settings():
             'temp_hot': (50, 85, 'Hot temp threshold'),
             'temp_critical': (60, 95, 'Critical temp threshold'),
             'check_interval': (2, 60, 'Check interval'),
-            'rampdown_delay': (5, 120, 'Rampdown delay')
+            'rampdown_delay': (5, 120, 'Rampdown delay'),
+            'sustained_hot_checks': (1, 60, 'Sustained hot checks')
         }
         
         for field, (min_val, max_val, label) in fields.items():
@@ -535,11 +553,64 @@ def update_fan_settings():
                 if value < min_val or value > max_val:
                     return jsonify({'error': f'{label} must be between {min_val} and {max_val}'}), 400
                 config['fan_control'][field] = value
+
+        if 'external' not in config or not isinstance(config['external'], dict):
+            config['external'] = {}
+
+        ext = config['external']
+        if 'gpu_fan_control_enabled' in data:
+            raw_gpu_enabled = data['gpu_fan_control_enabled']
+            if isinstance(raw_gpu_enabled, str):
+                ext['gpu_fan_control_enabled'] = raw_gpu_enabled.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                ext['gpu_fan_control_enabled'] = bool(raw_gpu_enabled)
+
+        if 'gpu_fan_display' in data:
+            ext['gpu_fan_display'] = str(data.get('gpu_fan_display', '')).strip()
+
+        if 'gpu_fan_xauthority' in data:
+            ext['gpu_fan_xauthority'] = str(data.get('gpu_fan_xauthority', '')).strip()
+
+        gpu_fields = {
+            'gpu_fan_target': (0, 15, 'GPU fan target index'),
+            'gpu_fan_min': (20, 100, 'GPU fan min'),
+            'gpu_fan_low': (20, 100, 'GPU fan low'),
+            'gpu_fan_normal': (20, 100, 'GPU fan normal'),
+            'gpu_fan_warm': (20, 100, 'GPU fan warm'),
+            'gpu_fan_hot': (20, 100, 'GPU fan hot'),
+            'gpu_fan_critical': (20, 100, 'GPU fan critical')
+        }
+
+        for field, (min_val, max_val, label) in gpu_fields.items():
+            if field in data:
+                try:
+                    value = int(data[field])
+                except (ValueError, TypeError):
+                    return jsonify({'error': f'{label} must be a number'}), 400
+                if value < min_val or value > max_val:
+                    return jsonify({'error': f'{label} must be between {min_val} and {max_val}'}), 400
+                ext[field] = value
         
         # Validate temp ordering: low < normal < warm < hot < critical
         fc = config['fan_control']
         if not (fc['temp_low'] < fc['temp_normal'] < fc['temp_warm'] < fc['temp_hot'] < fc['temp_critical']):
             return jsonify({'error': 'Temperature thresholds must be in ascending order: low < normal < warm < hot < critical'}), 400
+
+        if ext.get('gpu_fan_control_enabled'):
+            display = ext.get('gpu_fan_display', '').strip()
+            if not display:
+                return jsonify({'error': 'GPU fan display is required when GPU fan control is enabled'}), 400
+
+            curve = (
+                int(ext.get('gpu_fan_min', 35)),
+                int(ext.get('gpu_fan_low', 45)),
+                int(ext.get('gpu_fan_normal', 55)),
+                int(ext.get('gpu_fan_warm', 65)),
+                int(ext.get('gpu_fan_hot', 80)),
+                int(ext.get('gpu_fan_critical', 95))
+            )
+            if curve != tuple(sorted(curve)):
+                return jsonify({'error': 'GPU fan curve must be ascending: min <= low <= normal <= warm <= hot <= critical'}), 400
         
         save_config(config)
         app._config = config

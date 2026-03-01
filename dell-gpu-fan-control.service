@@ -11,8 +11,8 @@ StandardOutput=journal
 StandardError=journal
 
 # Restore automatic fan control on stop
-# WARNING: These credentials must match variables in dell_gpu_fan_control.sh
-ExecStop=/usr/bin/ipmitool -I lanplus -H 192.168.1.100 -U root -P calvin raw 0x30 0x30 0x01 0x01
+# Reads iDRAC credentials from /var/lib/dell_gpu_fan_control/config.json
+ExecStop=/bin/bash -lc 'CFG=/var/lib/dell_gpu_fan_control/config.json; if command -v jq >/dev/null 2>&1 && [ -f "$CFG" ]; then H=$(jq -r ".idrac.host // empty" "$CFG"); U=$(jq -r ".idrac.username // empty" "$CFG"); P=$(jq -r ".idrac.password // empty" "$CFG"); if [ -n "$H" ] && [ -n "$U" ] && [ -n "$P" ]; then /usr/bin/ipmitool -I lanplus -H "$H" -U "$U" -P "$P" raw 0x30 0x30 0x01 0x01 || true; fi; fi'
 
 [Install]
 WantedBy=multi-user.target

@@ -4,119 +4,151 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - GPU Fan Control Dashboard</title>
+    <title>GPU Dashboard Login</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+        :root {
+            --bg-0: #08121b;
+            --bg-1: #10222f;
+            --panel: rgba(11, 27, 39, 0.78);
+            --line: rgba(139, 190, 216, 0.25);
+            --text: #e8f4ff;
+            --muted: #9cb4c3;
+            --accent: #35c4ff;
+            --accent-2: #6ef3da;
+            --danger: #ff9f9f;
+            --radius: 18px;
+        }
+
         * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+            color: var(--text);
+            background: radial-gradient(circle at 20% 12%, #103c56 0%, transparent 40%),
+                radial-gradient(circle at 82% 14%, #1d5b48 0%, transparent 35%),
+                linear-gradient(145deg, var(--bg-0), var(--bg-1));
+            display: grid;
+            place-items: center;
+            padding: 18px;
         }
 
-        .login-container {
-            background: #1e293b;
-            border-radius: 16px;
-            padding: 40px;
-            width: 100%;
-            max-width: 400px;
-            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+        .login-card {
+            width: min(420px, 100%);
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            box-shadow: 0 20px 46px rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(10px);
+            padding: 26px;
+            animation: rise .45s ease both;
         }
 
-        .login-header {
-            text-align: center;
-            margin-bottom: 30px;
+        @keyframes rise {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
-        .login-header h1 {
-            color: #60a5fa;
-            font-size: 1.5rem;
-            margin-bottom: 8px;
+        .header {
+            margin-bottom: 18px;
         }
 
-        .login-header .subtitle {
-            color: #64748b;
-            font-size: 0.875rem;
+        .header h1 {
+            font-size: 1.45rem;
+            letter-spacing: .02em;
+            margin-bottom: 6px;
+        }
+
+        .header p {
+            color: var(--muted);
+            font-size: .88rem;
+            line-height: 1.4;
+        }
+
+        .error-message {
+            border: 1px solid rgba(255, 127, 127, 0.55);
+            background: rgba(80, 19, 19, 0.86);
+            color: var(--danger);
+            border-radius: 10px;
+            font-size: .86rem;
+            padding: 10px 12px;
+            margin-bottom: 12px;
         }
 
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 12px;
         }
 
         .form-group label {
             display: block;
-            color: #94a3b8;
-            font-size: 0.875rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            font-size: .72rem;
             margin-bottom: 6px;
-            font-weight: 500;
         }
 
         .form-group input {
             width: 100%;
-            padding: 12px 16px;
-            background: #0f172a;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            color: #e2e8f0;
-            font-size: 1rem;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(6, 21, 31, 0.74);
+            color: var(--text);
+            padding: 11px 12px;
+            font: inherit;
             outline: none;
-            transition: border-color 0.2s;
+            transition: .2s ease;
         }
 
         .form-group input:focus {
-            border-color: #3b82f6;
-        }
-
-        .form-group input::placeholder {
-            color: #475569;
+            border-color: rgba(53, 196, 255, 0.8);
+            box-shadow: 0 0 0 3px rgba(53, 196, 255, 0.2);
         }
 
         .login-btn {
             width: 100%;
-            padding: 12px;
-            background: #3b82f6;
-            color: #fff;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
+            margin-top: 4px;
+            border: 1px solid rgba(53, 196, 255, 0.72);
+            border-radius: 11px;
+            background: linear-gradient(90deg, rgba(53, 196, 255, 0.25), rgba(110, 243, 218, 0.18));
+            color: var(--text);
+            padding: 11px 14px;
+            font: inherit;
+            font-weight: 700;
+            letter-spacing: .02em;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: .2s ease;
         }
 
         .login-btn:hover {
-            background: #2563eb;
-        }
-
-        .error-message {
-            background: #7f1d1d;
-            color: #fecaca;
-            padding: 12px 16px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 0.875rem;
-            text-align: center;
+            transform: translateY(-1px);
+            box-shadow: 0 9px 22px rgba(53, 196, 255, 0.24);
         }
     </style>
 </head>
 
 <body>
-    <div class="login-container">
-        <div class="login-header">
-            <h1>🌡️ GPU Dashboard</h1>
-            <div class="subtitle">Dell R730 Fan Control</div>
+    <div class="login-card">
+        <div class="header">
+            <h1>GPU Cooling Control</h1>
+            <p>Secure access to Dell R730 thermal strategy and fan telemetry.</p>
         </div>
 
         {% if error %}
-        <div class="error-message">⚠️ {{ error }}</div>
+        <div class="error-message">{{ error }}</div>
         {% endif %}
 
         <form method="POST" action="/login">

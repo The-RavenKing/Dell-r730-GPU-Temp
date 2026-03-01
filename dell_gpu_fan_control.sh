@@ -32,8 +32,19 @@ TEMP_HOT=70
 TEMP_CRITICAL=80
 CHECK_INTERVAL=5
 RAMPDOWN_DELAY=20
+SUSTAINED_HOT_CHECKS=6
 GPU_NAME_FILTER="Quadro RTX 4000"
 GPU_INDEX=""
+GPU_FAN_CONTROL_ENABLED="false"
+GPU_FAN_DISPLAY=":1"
+GPU_FAN_XAUTHORITY=""
+GPU_FAN_TARGET=0
+GPU_FAN_MIN=35
+GPU_FAN_LOW=45
+GPU_FAN_NORMAL=55
+GPU_FAN_WARM=65
+GPU_FAN_HOT=80
+GPU_FAN_CRITICAL=95
 
 # Load from config.json if available
 if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
@@ -47,13 +58,33 @@ if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
     TEMP_CRITICAL=$(jq -r '.fan_control.temp_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$TEMP_CRITICAL")
     CHECK_INTERVAL=$(jq -r '.fan_control.check_interval // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHECK_INTERVAL")
     RAMPDOWN_DELAY=$(jq -r '.fan_control.rampdown_delay // empty' "$CONFIG_FILE" 2>/dev/null || echo "$RAMPDOWN_DELAY")
+    SUSTAINED_HOT_CHECKS=$(jq -r '.fan_control.sustained_hot_checks // empty' "$CONFIG_FILE" 2>/dev/null || echo "$SUSTAINED_HOT_CHECKS")
     GPU_NAME_FILTER=$(jq -r '.external.gpu_name // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_NAME_FILTER")
     GPU_INDEX=$(jq -r '.external.gpu_index // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_INDEX")
+    GPU_FAN_CONTROL_ENABLED=$(jq -r '.external.gpu_fan_control_enabled // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_CONTROL_ENABLED")
+    GPU_FAN_DISPLAY=$(jq -r '.external.gpu_fan_display // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_DISPLAY")
+    GPU_FAN_XAUTHORITY=$(jq -r '.external.gpu_fan_xauthority // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_XAUTHORITY")
+    GPU_FAN_TARGET=$(jq -r '.external.gpu_fan_target // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_TARGET")
+    GPU_FAN_MIN=$(jq -r '.external.gpu_fan_min // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_MIN")
+    GPU_FAN_LOW=$(jq -r '.external.gpu_fan_low // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_LOW")
+    GPU_FAN_NORMAL=$(jq -r '.external.gpu_fan_normal // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_NORMAL")
+    GPU_FAN_WARM=$(jq -r '.external.gpu_fan_warm // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_WARM")
+    GPU_FAN_HOT=$(jq -r '.external.gpu_fan_hot // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_HOT")
+    GPU_FAN_CRITICAL=$(jq -r '.external.gpu_fan_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_CRITICAL")
 fi
 
 # Keep sane defaults if optional external keys are missing/blank in config.
 if [ -z "$GPU_NAME_FILTER" ]; then
     GPU_NAME_FILTER="Quadro RTX 4000"
+fi
+if [ -z "$GPU_FAN_DISPLAY" ]; then
+    GPU_FAN_DISPLAY=":1"
+fi
+if ! [[ "$GPU_FAN_TARGET" =~ ^[0-9]+$ ]]; then
+    GPU_FAN_TARGET=0
+fi
+if ! [[ "$SUSTAINED_HOT_CHECKS" =~ ^[0-9]+$ ]] || [ "$SUSTAINED_HOT_CHECKS" -lt 1 ]; then
+    SUSTAINED_HOT_CHECKS=6
 fi
 
 # Fan speed settings (in hex, 0x00-0x64 = 0-100%)
@@ -77,6 +108,177 @@ DB_FILE="/var/lib/dell_gpu_fan_control/metrics.db"
 hex_to_dec() {
     # Convert hex fan speed (e.g. 0x28) to decimal (e.g. 40)
     echo $((16#${1#0x}))
+}
+
+normalize_bool() {
+    case "${1,,}" in
+        true|1|yes|on) echo "true" ;;
+        *) echo "false" ;;
+    esac
+}
+
+clamp_percent() {
+    local value=$1
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo 0
+        return
+    fi
+    if [ "$value" -lt 0 ]; then
+        echo 0
+    elif [ "$value" -gt 100 ]; then
+        echo 100
+    else
+        echo "$value"
+    fi
+}
+
+lower_chassis_fan_step() {
+    local speed_hex=$1
+    case "$speed_hex" in
+        "$FAN_MAX") echo "$FAN_HIGH" ;;
+        "$FAN_HIGH") echo "$FAN_MEDIUM" ;;
+        "$FAN_MEDIUM") echo "$FAN_NORMAL" ;;
+        "$FAN_NORMAL") echo "$FAN_LOW" ;;
+        "$FAN_LOW") echo "$FAN_MIN" ;;
+        *) echo "$FAN_MIN" ;;
+    esac
+}
+
+nvidia_settings_exec() {
+    if [ -z "$NVIDIA_SETTINGS_CMD" ]; then
+        return 1
+    fi
+    if [ -n "$GPU_FAN_XAUTHORITY" ]; then
+        DISPLAY="$GPU_FAN_DISPLAY" XAUTHORITY="$GPU_FAN_XAUTHORITY" "$NVIDIA_SETTINGS_CMD" "$@"
+    else
+        DISPLAY="$GPU_FAN_DISPLAY" "$NVIDIA_SETTINGS_CMD" "$@"
+    fi
+}
+
+find_nvidia_settings_cmd() {
+    NVIDIA_SETTINGS_CMD=""
+    local configured_path=""
+
+    if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
+        configured_path=$(jq -r '.external.nvidia_settings_path // empty' "$CONFIG_FILE" 2>/dev/null)
+        if [ -n "$configured_path" ] && [ -x "$configured_path" ]; then
+            NVIDIA_SETTINGS_CMD="$configured_path"
+            return
+        fi
+    fi
+
+    if command -v nvidia-settings &> /dev/null; then
+        NVIDIA_SETTINGS_CMD=$(command -v nvidia-settings)
+        return
+    fi
+
+    for path in /usr/bin/nvidia-settings /usr/local/bin/nvidia-settings /usr/sbin/nvidia-settings /bin/nvidia-settings; do
+        if [ -x "$path" ]; then
+            NVIDIA_SETTINGS_CMD="$path"
+            return
+        fi
+    done
+}
+
+calculate_gpu_fan_target() {
+    local temp=$1
+
+    GPU_FAN_MIN=$(clamp_percent "$GPU_FAN_MIN")
+    GPU_FAN_LOW=$(clamp_percent "$GPU_FAN_LOW")
+    GPU_FAN_NORMAL=$(clamp_percent "$GPU_FAN_NORMAL")
+    GPU_FAN_WARM=$(clamp_percent "$GPU_FAN_WARM")
+    GPU_FAN_HOT=$(clamp_percent "$GPU_FAN_HOT")
+    GPU_FAN_CRITICAL=$(clamp_percent "$GPU_FAN_CRITICAL")
+
+    if [ "$temp" -lt "$TEMP_LOW" ]; then
+        echo "$GPU_FAN_MIN"
+    elif [ "$temp" -lt "$TEMP_NORMAL" ]; then
+        echo "$GPU_FAN_LOW"
+    elif [ "$temp" -lt "$TEMP_WARM" ]; then
+        echo "$GPU_FAN_NORMAL"
+    elif [ "$temp" -lt "$TEMP_HOT" ]; then
+        echo "$GPU_FAN_WARM"
+    elif [ "$temp" -lt "$TEMP_CRITICAL" ]; then
+        echo "$GPU_FAN_HOT"
+    else
+        echo "$GPU_FAN_CRITICAL"
+    fi
+}
+
+init_gpu_fan_control() {
+    GPU_FAN_CONTROL_ENABLED=$(normalize_bool "$GPU_FAN_CONTROL_ENABLED")
+    GPU_FAN_CONTROL_READY=0
+    GPU_MANUAL_ACTIVE=0
+    CURRENT_GPU_FAN_TARGET=-1
+
+    if [ "$GPU_FAN_CONTROL_ENABLED" != "true" ]; then
+        log_message "GPU fan assist disabled (external.gpu_fan_control_enabled=false)"
+        return
+    fi
+
+    find_nvidia_settings_cmd
+    if [ -z "$NVIDIA_SETTINGS_CMD" ]; then
+        log_message "WARNING: GPU fan assist requested but nvidia-settings was not found; continuing with chassis-only control"
+        return
+    fi
+
+    if ! nvidia_settings_exec -q fans >/dev/null 2>&1; then
+        log_message "WARNING: GPU fan assist unavailable on DISPLAY=${GPU_FAN_DISPLAY}; check X server and XAUTHORITY"
+        return
+    fi
+
+    if ! nvidia_settings_exec -a "[gpu:${GPU_INDEX}]/GPUFanControlState=1" >/dev/null 2>&1; then
+        log_message "WARNING: Could not enable GPU fan manual mode on gpu:${GPU_INDEX}; continuing with chassis-only control"
+        return
+    fi
+
+    GPU_FAN_CONTROL_READY=1
+    GPU_MANUAL_ACTIVE=1
+    log_message "GPU fan assist enabled via $NVIDIA_SETTINGS_CMD (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
+}
+
+set_gpu_fan_speed() {
+    local target_pct=$1
+
+    if [ "$GPU_FAN_CONTROL_READY" -ne 1 ]; then
+        return 1
+    fi
+
+    target_pct=$(clamp_percent "$target_pct")
+
+    if [ "$CURRENT_GPU_FAN_TARGET" -eq "$target_pct" ] 2>/dev/null; then
+        return 0
+    fi
+
+    if nvidia_settings_exec -a "[fan:${GPU_FAN_TARGET}]/GPUTargetFanSpeed=${target_pct}" >/dev/null 2>&1; then
+        CURRENT_GPU_FAN_TARGET=$target_pct
+        return 0
+    fi
+
+    log_message "WARNING: Failed to set GPU fan target to ${target_pct}% (fan:${GPU_FAN_TARGET}); disabling GPU fan assist"
+    GPU_FAN_CONTROL_READY=0
+    return 1
+}
+
+format_gpu_fan_status() {
+    local observed_pct=$1
+    local target_pct=$2
+    if [ "$target_pct" -ge 0 ] 2>/dev/null; then
+        echo "GPU fan: ${observed_pct}% (target ${target_pct}%)"
+    else
+        echo "GPU fan: ${observed_pct}%"
+    fi
+}
+
+disable_gpu_fan_control() {
+    if [ "${GPU_MANUAL_ACTIVE:-0}" -eq 1 ]; then
+        if nvidia_settings_exec -a "[gpu:${GPU_INDEX}]/GPUFanControlState=0" >/dev/null 2>&1; then
+            log_message "GPU fan control returned to automatic mode"
+        else
+            log_message "WARNING: Failed to return GPU fan control to automatic mode"
+        fi
+    fi
+    GPU_MANUAL_ACTIVE=0
 }
 
 init_database() {
@@ -340,6 +542,7 @@ calculate_fan_speed_target() {
     # Calculate fan speed target from GPU temperatures and GPU fan load
     local temp=$1
     local gpu_fan_pct=$2
+    local gpu_target_pct=$3
     local fan_speed
 
     if [ "$temp" -lt "$TEMP_LOW" ]; then
@@ -356,14 +559,21 @@ calculate_fan_speed_target() {
         fan_speed=$FAN_MAX
     fi
 
-    # If GPU onboard fan is already working hard, increase chassis airflow proactively.
-    if [ "$gpu_fan_pct" -ge 95 ] 2>/dev/null; then
-        fan_speed=$FAN_MAX
-    elif [ "$gpu_fan_pct" -ge 85 ] 2>/dev/null; then
-        local fan_speed_dec
-        fan_speed_dec=$(hex_to_dec "$fan_speed")
-        if [ "$fan_speed_dec" -lt "$(hex_to_dec "$FAN_HIGH")" ]; then
-            fan_speed=$FAN_HIGH
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        # When GPU fan assist is active, allow one lower chassis step in non-hot ranges.
+        if [ "$temp" -lt "$TEMP_WARM" ] && [ "$gpu_target_pct" -ge "$GPU_FAN_NORMAL" ] 2>/dev/null; then
+            fan_speed=$(lower_chassis_fan_step "$fan_speed")
+        fi
+    else
+        # If GPU onboard fan is already working hard, increase chassis airflow proactively.
+        if [ "$gpu_fan_pct" -ge 95 ] 2>/dev/null; then
+            fan_speed=$FAN_MAX
+        elif [ "$gpu_fan_pct" -ge 85 ] 2>/dev/null; then
+            local fan_speed_dec
+            fan_speed_dec=$(hex_to_dec "$fan_speed")
+            if [ "$fan_speed_dec" -lt "$(hex_to_dec "$FAN_HIGH")" ]; then
+                fan_speed=$FAN_HIGH
+            fi
         fi
     fi
 
@@ -377,6 +587,7 @@ cleanup() {
     log_message "Received termination signal, cleaning up..."
     log_statistics_summary
     save_statistics_to_database
+    disable_gpu_fan_control
     disable_manual_fan_control
     log_message "Script terminated"
     exit 0
@@ -515,6 +726,7 @@ else
 fi
 
 resolve_gpu_index
+init_gpu_fan_control
 
 # Check if ipmitool is available
 if ! command -v ipmitool &> /dev/null; then
@@ -545,9 +757,16 @@ sleep 2
 log_message "Starting temperature monitoring loop (checking every ${CHECK_INTERVAL}s)..."
 log_message "Monitoring: GPU core, hotspot, and memory temperatures"
 log_message "Hysteresis enabled: Fans ramp UP immediately, ramp DOWN after ${RAMPDOWN_DELAY}s"
+if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+    log_message "GPU fan assist active (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
+else
+    log_message "GPU fan assist inactive; chassis fan control only"
+fi
+log_message "Sustained heat policy: if max temp stays >= ${TEMP_HOT}C for ${SUSTAINED_HOT_CHECKS} checks, enforce higher cooling"
 current_fan_speed=""
 pending_decrease_speed=""
 decrease_pending_since=0
+hot_streak_count=0
 reset_statistics
 last_stats_report=$(date +%s)
 STATS_REPORT_INTERVAL=3600  # Report statistics every hour
@@ -570,9 +789,39 @@ while true; do
     
     # Log and stats update moved to end of loop to capture final state
     
-    # Calculate target fan speed based on maximum temperature
-    target_fan_speed=$(calculate_fan_speed_target "$max_temp" "$gpu_fan_pct")
-    
+    # Layer 1: preemptive GPU fan assist based on temp bands.
+    target_gpu_fan_pct=-1
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        target_gpu_fan_pct=$(calculate_gpu_fan_target "$max_temp")
+        set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
+    fi
+
+    # Layer 2: chassis target based on temps and GPU fan behavior.
+    target_fan_speed=$(calculate_fan_speed_target "$max_temp" "$gpu_fan_pct" "$target_gpu_fan_pct")
+
+    # Layer 3: sustained-heat safety override.
+    if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
+        hot_streak_count=$((hot_streak_count + 1))
+        target_fan_speed=$FAN_MAX
+        if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+            target_gpu_fan_pct=$GPU_FAN_CRITICAL
+            set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
+        fi
+    elif [ "$max_temp" -ge "$TEMP_HOT" ]; then
+        hot_streak_count=$((hot_streak_count + 1))
+        if [ "$hot_streak_count" -ge "$SUSTAINED_HOT_CHECKS" ]; then
+            if [ "$(hex_to_dec "$target_fan_speed")" -lt "$(hex_to_dec "$FAN_HIGH")" ]; then
+                target_fan_speed=$FAN_HIGH
+            fi
+            if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ] && [ "$target_gpu_fan_pct" -lt "$GPU_FAN_HOT" ]; then
+                target_gpu_fan_pct=$GPU_FAN_HOT
+                set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
+            fi
+        fi
+    else
+        hot_streak_count=0
+    fi
+
     # Convert hex to decimal for comparison
     if [ -n "$current_fan_speed" ]; then
         current_speed_dec=$(hex_to_dec "$current_fan_speed")
@@ -580,11 +829,12 @@ while true; do
         current_speed_dec=0
     fi
     target_speed_dec=$(hex_to_dec "$target_fan_speed")
+    gpu_fan_status=$(format_gpu_fan_status "$gpu_fan_pct" "$target_gpu_fan_pct")
     
     # Determine if we need to change fan speed
     if [ "$target_speed_dec" -gt "$current_speed_dec" ]; then
         # Temperature rising - respond IMMEDIATELY
-        log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → INCREASING fans"
+        log_message "GPU: ${gpu_temp}C | Hotspot: ${hotspot_temp}C | Memory: ${memory_temp}C | Max: ${max_temp}C | ${gpu_fan_status} -> INCREASING chassis fans"
         set_fan_speed "$target_fan_speed"
         current_fan_speed=$target_fan_speed
         pending_decrease_speed=""
@@ -602,7 +852,7 @@ while true; do
             # This is a new decrease request, start the timer
             pending_decrease_speed=$target_fan_speed
             decrease_pending_since=$(date +%s)
-            log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Lower fans possible, waiting ${RAMPDOWN_DELAY}s"
+            log_message "GPU: ${gpu_temp}C | Hotspot: ${hotspot_temp}C | Memory: ${memory_temp}C | Max: ${max_temp}C | ${gpu_fan_status} -> Lower chassis fans possible, waiting ${RAMPDOWN_DELAY}s"
         else
             # We're already waiting for this decrease
             current_time=$(date +%s)
@@ -610,7 +860,7 @@ while true; do
             
             if [ "$elapsed" -ge "$RAMPDOWN_DELAY" ]; then
                 # Enough time has passed, apply the decrease
-                log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → DECREASING fans (stable ${elapsed}s)"
+                log_message "GPU: ${gpu_temp}C | Hotspot: ${hotspot_temp}C | Memory: ${memory_temp}C | Max: ${max_temp}C | ${gpu_fan_status} -> DECREASING chassis fans (stable ${elapsed}s)"
                 set_fan_speed "$target_fan_speed"
                 current_fan_speed=$target_fan_speed
                 pending_decrease_speed=""
@@ -623,13 +873,13 @@ while true; do
             else
                 # Still waiting
                 remaining=$((RAMPDOWN_DELAY - elapsed))
-                log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Waiting ${remaining}s before decreasing"
+                log_message "GPU: ${gpu_temp}C | Hotspot: ${hotspot_temp}C | Memory: ${memory_temp}C | Max: ${max_temp}C | ${gpu_fan_status} -> Waiting ${remaining}s before decreasing chassis fans"
             fi
         fi
         
     else
         # Temperature stable at current fan speed
-        log_message "GPU: ${gpu_temp}°C | Hotspot: ${hotspot_temp}°C | Memory: ${memory_temp}°C | Max: ${max_temp}°C → Fan speed optimal"
+        log_message "GPU: ${gpu_temp}C | Hotspot: ${hotspot_temp}C | Memory: ${memory_temp}C | Max: ${max_temp}C | ${gpu_fan_status} -> Fan speeds optimal"
         # Reset any pending decrease since we're at the right speed
         pending_decrease_speed=""
         decrease_pending_since=0
@@ -637,9 +887,9 @@ while true; do
     
     # Check for concerning temperature patterns
     if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
-        log_message "⚠️  CRITICAL: Temperature at ${max_temp}°C! Fans at maximum."
+        log_message "CRITICAL: Temperature at ${max_temp}C. Maximum cooling applied."
     elif [ "$max_temp" -ge "$TEMP_HOT" ] && [ "$hotspot_temp" -gt "$gpu_temp" ]; then
-        log_message "⚠️  NOTICE: Hotspot temp significantly higher than GPU average (Δ$((hotspot_temp - gpu_temp))°C)"
+        log_message "NOTICE: Hotspot temp exceeds GPU average by $((hotspot_temp - gpu_temp))C"
     fi
     
     # Periodic statistics report

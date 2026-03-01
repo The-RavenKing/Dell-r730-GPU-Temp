@@ -19,19 +19,11 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Get configuration from user
-echo -e "\n${YELLOW}Configuration Required:${NC}"
-read -p "iDRAC IP Address [192.168.1.100]: " idrac_host
-IDRAC_HOST=${idrac_host:-192.168.1.100}
-
-read -p "iDRAC Username [root]: " idrac_user
-IDRAC_USER=${idrac_user:-root}
-
-# Prompt for password securely
-echo -n "iDRAC Password [calvin]: "
-read -s idrac_pass
-echo
-IDRAC_PASS=${idrac_pass:-calvin}
+CONFIG_PATH="/var/lib/dell_gpu_fan_control/config.json"
+CONFIG_EXISTED=0
+if [ -f "$CONFIG_PATH" ]; then
+    CONFIG_EXISTED=1
+fi
 
 echo -e "\n${GREEN}Installing Dependencies...${NC}"
 # Check if apt-get is available (Debian/Ubuntu) or yum (RHEL/CentOS)
@@ -46,6 +38,40 @@ elif command -v yum &> /dev/null; then
 else
     echo -e "${RED}Error: Unsupported package manager. Please install dependencies manually.${NC}"
     exit 1
+fi
+
+# Resolve iDRAC settings: reuse existing config when available, prompt only when missing.
+EXISTING_IDRAC_HOST=""
+EXISTING_IDRAC_USER=""
+EXISTING_IDRAC_PASS=""
+if [ -f "$CONFIG_PATH" ] && command -v jq &> /dev/null; then
+    EXISTING_IDRAC_HOST=$(jq -r '.idrac.host // empty' "$CONFIG_PATH" 2>/dev/null)
+    EXISTING_IDRAC_USER=$(jq -r '.idrac.username // empty' "$CONFIG_PATH" 2>/dev/null)
+    EXISTING_IDRAC_PASS=$(jq -r '.idrac.password // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+if [ "$EXISTING_IDRAC_HOST" = "null" ]; then EXISTING_IDRAC_HOST=""; fi
+if [ "$EXISTING_IDRAC_USER" = "null" ]; then EXISTING_IDRAC_USER=""; fi
+if [ "$EXISTING_IDRAC_PASS" = "null" ]; then EXISTING_IDRAC_PASS=""; fi
+
+if [ -n "$EXISTING_IDRAC_HOST" ] && [ -n "$EXISTING_IDRAC_USER" ] && [ -n "$EXISTING_IDRAC_PASS" ]; then
+    IDRAC_HOST="$EXISTING_IDRAC_HOST"
+    IDRAC_USER="$EXISTING_IDRAC_USER"
+    IDRAC_PASS="$EXISTING_IDRAC_PASS"
+    echo -e "\n${GREEN}Using persisted iDRAC settings from ${CONFIG_PATH}${NC}"
+    echo -e "  Host: ${YELLOW}${IDRAC_HOST}${NC}"
+    echo -e "  User: ${YELLOW}${IDRAC_USER}${NC}"
+else
+    echo -e "\n${YELLOW}Configuration Required:${NC}"
+    read -p "iDRAC IP Address [192.168.1.100]: " idrac_host
+    IDRAC_HOST=${idrac_host:-192.168.1.100}
+
+    read -p "iDRAC Username [root]: " idrac_user
+    IDRAC_USER=${idrac_user:-root}
+
+    echo -n "iDRAC Password [calvin]: "
+    read -s idrac_pass
+    echo
+    IDRAC_PASS=${idrac_pass:-calvin}
 fi
 
 # echo -e "${GREEN}Installing Python Dependencies...${NC}"
@@ -80,8 +106,8 @@ fi
 
 # Determine Dashboard Port
 # Check if a port is already configured in config.json
-if [ -f "/var/lib/dell_gpu_fan_control/config.json" ] && command -v jq &> /dev/null; then
-    EXISTING_PORT=$(jq -r '.dashboard.port // empty' /var/lib/dell_gpu_fan_control/config.json 2>/dev/null)
+if [ -f "$CONFIG_PATH" ] && command -v jq &> /dev/null; then
+    EXISTING_PORT=$(jq -r '.dashboard.port // empty' "$CONFIG_PATH" 2>/dev/null)
 else
     EXISTING_PORT=""
 fi
@@ -111,9 +137,20 @@ if [ -z "$NVIDIA_SMI_PATH" ]; then
 fi
 echo -e "${GREEN}Detected nvidia-smi at: ${YELLOW}${NVIDIA_SMI_PATH:-Not Found (will auto-detect at runtime)}${NC}"
 
-# Create config.json with user values
-# We use a temporary config file first
-cat > /tmp/config.json <<EOF
+# Find nvidia-settings path for optional GPU fan assist
+NVIDIA_SETTINGS_PATH=$(which nvidia-settings 2>/dev/null)
+if [ -z "$NVIDIA_SETTINGS_PATH" ]; then
+    for path in /usr/bin/nvidia-settings /usr/local/bin/nvidia-settings /usr/sbin/nvidia-settings /bin/nvidia-settings; do
+        if [ -x "$path" ]; then
+            NVIDIA_SETTINGS_PATH="$path"
+            break
+        fi
+    done
+fi
+echo -e "${GREEN}Detected nvidia-settings at: ${YELLOW}${NVIDIA_SETTINGS_PATH:-Not Found (GPU fan assist optional)}${NC}"
+
+# Build default config, then merge with existing config so credentials/settings persist.
+cat > /tmp/config.defaults.json <<EOF
 {
   "dashboard": {
     "username": "admin",
@@ -132,16 +169,36 @@ cat > /tmp/config.json <<EOF
     "temp_hot": 70,
     "temp_critical": 80,
     "check_interval": 5,
-    "rampdown_delay": 20
+    "rampdown_delay": 20,
+    "sustained_hot_checks": 6
   },
   "external": {
-    "nvidia_smi_path": "${NVIDIA_SMI_PATH}"
+    "nvidia_smi_path": "${NVIDIA_SMI_PATH}",
+    "nvidia_settings_path": "${NVIDIA_SETTINGS_PATH}",
+    "gpu_name": "Quadro RTX 4000",
+    "gpu_index": "",
+    "gpu_fan_control_enabled": false,
+    "gpu_fan_display": ":1",
+    "gpu_fan_xauthority": "",
+    "gpu_fan_target": 0,
+    "gpu_fan_min": 35,
+    "gpu_fan_low": 45,
+    "gpu_fan_normal": 55,
+    "gpu_fan_warm": 65,
+    "gpu_fan_hot": 80,
+    "gpu_fan_critical": 95
   }
 }
 EOF
 
-mv /tmp/config.json /var/lib/dell_gpu_fan_control/config.json
-chmod 600 /var/lib/dell_gpu_fan_control/config.json
+if [ -f "$CONFIG_PATH" ] && command -v jq &> /dev/null; then
+    jq -s '.[0] * .[1]' /tmp/config.defaults.json "$CONFIG_PATH" > /tmp/config.json
+else
+    cp /tmp/config.defaults.json /tmp/config.json
+fi
+
+mv /tmp/config.json "$CONFIG_PATH"
+chmod 600 "$CONFIG_PATH"
 
 echo -e "${GREEN}Initializing Database...${NC}"
 # Pre-initialize database to avoid "Database not found" errors in dashboard
@@ -154,7 +211,8 @@ CREATE TABLE IF NOT EXISTS temperature_readings (
     hotspot_temp INTEGER NOT NULL,
     memory_temp INTEGER NOT NULL,
     max_temp INTEGER NOT NULL,
-    fan_speed INTEGER NOT NULL
+    fan_speed INTEGER NOT NULL,
+    gpu_fan_pct INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE TABLE IF NOT EXISTS fan_events (
@@ -183,26 +241,16 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON fan_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_stats_period ON statistics(period_start, period_end);
 
 -- Insert dummy data to show dashboard immediately (will be stale after 60s)
-INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed)
-VALUES ($(date +%s), 0, 0, 0, 0, 0);
+INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct)
+VALUES ($(date +%s), 0, 0, 0, 0, 0, -1);
 
 EOF
 chmod 666 /var/lib/dell_gpu_fan_control/metrics.db
 
 echo -e "${GREEN}Configuring Services...${NC}"
 
-# Update service file with correct IPMI credentials for ExecStop using sed
-# We create a temporary service file first
 if [ -f "dell-gpu-fan-control.service" ]; then
-    cp dell-gpu-fan-control.service /tmp/dell-gpu-fan-control.service
-    
-    # Use different delimiters in sed to handle special characters in password
-    # We escape the password for sed
-    ESCAPED_PASS=$(printf '%s\n' "$IDRAC_PASS" | sed -e 's/[\/&]/\\&/g')
-    
-    sed -i "s/-H [0-9.]* -U [a-zA-Z0-9]* -P [a-zA-Z0-9]*/-H ${IDRAC_HOST} -U ${IDRAC_USER} -P ${ESCAPED_PASS}/g" /tmp/dell-gpu-fan-control.service
-
-    mv /tmp/dell-gpu-fan-control.service /etc/systemd/system/
+    cp dell-gpu-fan-control.service /etc/systemd/system/
 else
      echo -e "${RED}Error: dell-gpu-fan-control.service not found.${NC}"
      exit 1
@@ -228,13 +276,20 @@ systemctl restart dell-gpu-dashboard.service
 
 # Get server IP
 SERVER_IP=$(hostname -I | awk '{print $1}')
+if command -v jq &> /dev/null && [ -f "$CONFIG_PATH" ]; then
+    DASHBOARD_PORT=$(jq -r '.dashboard.port // 8080' "$CONFIG_PATH" 2>/dev/null)
+fi
 
 echo -e "\n${GREEN}Installation Complete!${NC}"
 echo -e "------------------------------------------------"
 echo -e "Dashboard is available at: ${YELLOW}http://${SERVER_IP}:${DASHBOARD_PORT}${NC}"
-echo -e "Default Dashboard Login:"
-echo -e "  Username: ${YELLOW}admin${NC}"
-echo -e "  Password: ${YELLOW}password${NC}"
+if [ "$CONFIG_EXISTED" -eq 1 ]; then
+    echo -e "Dashboard credentials and iDRAC settings were preserved from existing config."
+else
+    echo -e "Default Dashboard Login:"
+    echo -e "  Username: ${YELLOW}admin${NC}"
+    echo -e "  Password: ${YELLOW}password${NC}"
+fi
 echo -e "------------------------------------------------"
 echo -e "Check status with:"
 echo -e "  sudo systemctl status dell-gpu-fan-control"

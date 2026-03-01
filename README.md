@@ -7,6 +7,7 @@ This script provides dynamic fan control for Dell PowerEdge R730 servers with Nv
 - **Fast 5-second response** to catch rapid temperature spikes during inference
 - **Multi-sensor monitoring** - tracks GPU core, hotspot, and memory temperatures
 - **Intelligent fan control** - uses the highest temperature reading for safety
+- **Layered cooling strategy** - GPU fan assist first, chassis fan second, sustained-heat safety escalation
 - **Hysteresis logic** - fans ramp UP immediately when temp rises, ramp DOWN gradually when temp drops
 - **Prevents fan oscillation** during the bursty load patterns typical of LLM work
 - **Statistics tracking** - monitors peak temps, fan usage, and provides hourly summaries
@@ -35,6 +36,7 @@ This script solves that problem by:
   - Linux: `sudo apt-get install ipmitool` (Debian/Ubuntu) or `sudo yum install ipmitool` (RHEL/CentOS)
   - Windows: Install Dell OpenManage BMC Utility
 - **nvidia-smi** - Comes with Nvidia drivers
+- **nvidia-settings** - Optional, required for GPU fan assist mode
 - **Bash shell** - For running the script (Linux/macOS)
 - **SQLite3** - For database storage (optional, but required for web dashboard)
   - Linux: `sudo apt-get install sqlite3` (Debian/Ubuntu) or `sudo yum install sqlite3` (RHEL/CentOS)
@@ -54,6 +56,11 @@ This script solves that problem by:
 5. Click "Apply"
 
 ## Installation
+
+Installer behavior on reruns:
+- Existing `config.json` values are preserved (including iDRAC host/user/password and dashboard credentials).
+- iDRAC prompts are skipped when valid persisted values already exist.
+- New config keys introduced by updates are merged in automatically.
 
 ### 1. Edit Configuration
 
@@ -82,6 +89,9 @@ CHECK_INTERVAL=5
 
 # Hysteresis - prevents fan oscillation
 RAMPDOWN_DELAY=20  # Wait 20s before decreasing fans
+
+# Sustained-heat safety policy
+SUSTAINED_HOT_CHECKS=6  # If temp stays hot this many cycles, force stronger cooling
 ```
 
 **Why these settings work for LLM inference:**
@@ -92,10 +102,39 @@ RAMPDOWN_DELAY=20  # Wait 20s before decreasing fans
 For the Quadro RTX 4000, the maximum operating temperature is around 90°C, but these thresholds keep it well below that with good safety margins.
 
 **Adjusting for your environment:**
-- **Warmer room/datacenter?** Lower all thresholds by 5-10°C
-- **24/7 heavy inference?** Consider lowering TEMP_WARM to 55°C
-- **Noise sensitive?** Increase TEMP_WARM to 65°C (but monitor temps closely)
+- **Warmer room/datacenter?** Lower all thresholds by 5-10C
+- **24/7 heavy inference?** Consider lowering TEMP_WARM to 55C
+- **Noise sensitive?** Increase TEMP_WARM to 65C (but monitor temps closely)
 - **Fans cycling too much?** Increase RAMPDOWN_DELAY to 30-40 seconds
+- **Temps remain high for long periods?** Lower `SUSTAINED_HOT_CHECKS` so safety escalation happens sooner
+
+### 2b. Optional: Enable GPU Fan Assist (Recommended for Lower Chassis Noise)
+
+The controller can also set the GPU onboard fan speed with `nvidia-settings`. This lets the script cool the GPU proactively before it has to push chassis fans as hard.
+
+Requirements:
+- `nvidia-settings` installed
+- An available X display (for example `:1`)
+- Optional `XAUTHORITY` path if required by your setup
+
+Config keys (in `/var/lib/dell_gpu_fan_control/config.json` under `external`):
+
+```json
+{
+  "gpu_fan_control_enabled": true,
+  "gpu_fan_display": ":1",
+  "gpu_fan_xauthority": "/home/karl/.Xauthority",
+  "gpu_fan_target": 0,
+  "gpu_fan_min": 35,
+  "gpu_fan_low": 45,
+  "gpu_fan_normal": 55,
+  "gpu_fan_warm": 65,
+  "gpu_fan_hot": 80,
+  "gpu_fan_critical": 95
+}
+```
+
+If GPU fan assist cannot be initialized, the script falls back to chassis-only control automatically.
 
 ### 3. Install the Script
 
@@ -140,9 +179,6 @@ This makes the script run automatically at startup:
 # Copy the service file
 sudo cp dell-gpu-fan-control.service /etc/systemd/system/
 
-# Edit the service file to match your iDRAC credentials (in ExecStop line)
-sudo nano /etc/systemd/system/dell-gpu-fan-control.service
-
 # Reload systemd
 sudo systemctl daemon-reload
 
@@ -155,6 +191,8 @@ sudo systemctl start dell-gpu-fan-control.service
 # Check status
 sudo systemctl status dell-gpu-fan-control.service
 ```
+
+`dell-gpu-fan-control.service` now reads iDRAC credentials from `/var/lib/dell_gpu_fan_control/config.json` during shutdown, so you do not need to keep editing `ExecStop` manually.
 
 ### 6. Monitor the Service
 
