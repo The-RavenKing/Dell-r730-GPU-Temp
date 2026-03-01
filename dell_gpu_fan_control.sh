@@ -270,6 +270,77 @@ set_gpu_fan_speed() {
     return 1
 }
 
+apply_gpu_fan_hysteresis() {
+    # Apply hysteresis to GPU fan target:
+    # - ramp UP immediately
+    # - ramp DOWN only after RAMPDOWN_DELAY seconds of stable lower target
+    local requested_pct=$1
+    local latch_active=${2:-0}
+    local now
+    local elapsed
+
+    requested_pct=$(clamp_percent "$requested_pct")
+
+    if [ "${GPU_FAN_CONTROL_READY:-0}" -ne 1 ]; then
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        echo "$requested_pct"
+        return
+    fi
+
+    # While hot latch is active, always apply immediately.
+    if [ "$latch_active" -eq 1 ] 2>/dev/null; then
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        echo "$requested_pct"
+        return
+    fi
+
+    # If we do not have a known current target yet, apply requested target.
+    if ! [[ "${CURRENT_GPU_FAN_TARGET:-}" =~ ^-?[0-9]+$ ]] || [ "$CURRENT_GPU_FAN_TARGET" -lt 0 ]; then
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        echo "$requested_pct"
+        return
+    fi
+
+    if [ "$requested_pct" -gt "$CURRENT_GPU_FAN_TARGET" ]; then
+        # Temperature rising, apply higher GPU fan target immediately.
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        echo "$requested_pct"
+        return
+    fi
+
+    if [ "$requested_pct" -eq "$CURRENT_GPU_FAN_TARGET" ]; then
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        echo "$requested_pct"
+        return
+    fi
+
+    # Requested target is lower than current target: hold until stable.
+    now=$(date +%s)
+    if [ "$pending_gpu_decrease_pct" != "$requested_pct" ]; then
+        pending_gpu_decrease_pct=$requested_pct
+        gpu_decrease_pending_since=$now
+        log_message "GPU fan decrease to ${requested_pct}% requested; waiting ${RAMPDOWN_DELAY}s for stability"
+        echo "$CURRENT_GPU_FAN_TARGET"
+        return
+    fi
+
+    elapsed=$((now - gpu_decrease_pending_since))
+    if [ "$elapsed" -ge "$RAMPDOWN_DELAY" ]; then
+        pending_gpu_decrease_pct=""
+        gpu_decrease_pending_since=0
+        log_message "GPU fan decrease to ${requested_pct}% applied after ${elapsed}s stable"
+        echo "$requested_pct"
+        return
+    fi
+
+    echo "$CURRENT_GPU_FAN_TARGET"
+}
+
 format_gpu_fan_status() {
     local observed_pct=$1
     local target_pct=$2
@@ -301,6 +372,10 @@ init_database() {
     
     # Initialize SQLite database with tables
     sqlite3 "$DB_FILE" <<EOF
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=3000;
+
 CREATE TABLE IF NOT EXISTS temperature_readings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL,
@@ -340,9 +415,9 @@ EOF
 
     # Add new columns on existing databases without dropping history
     local has_gpu_fan_column
-    has_gpu_fan_column=$(sqlite3 "$DB_FILE" "PRAGMA table_info(temperature_readings);" | grep -c '|gpu_fan_pct|')
+    has_gpu_fan_column=$(sqlite3 -cmd ".timeout 3000" "$DB_FILE" "PRAGMA table_info(temperature_readings);" | grep -c '|gpu_fan_pct|')
     if [ "$has_gpu_fan_column" -eq 0 ]; then
-        sqlite3 "$DB_FILE" "ALTER TABLE temperature_readings ADD COLUMN gpu_fan_pct INTEGER NOT NULL DEFAULT -1;"
+        sqlite3 -cmd ".timeout 3000" "$DB_FILE" "ALTER TABLE temperature_readings ADD COLUMN gpu_fan_pct INTEGER NOT NULL DEFAULT -1;"
     fi
     
     if [ $? -eq 0 ]; then
@@ -352,6 +427,28 @@ EOF
         log_message "ERROR: Failed to initialize database"
         return 1
     fi
+}
+
+write_db_sql() {
+    # Execute write SQL with timeout and retry to reduce lock errors.
+    local sql="$1"
+    local max_attempts=3
+    local attempt=1
+
+    if [ -z "$DB_FILE" ]; then
+        return 0
+    fi
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if sqlite3 -cmd ".timeout 3000" "$DB_FILE" "$sql" >/dev/null 2>&1; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+
+    log_message "WARNING: SQLite write failed after ${max_attempts} attempts"
+    return 1
 }
 
 log_to_database() {
@@ -367,10 +464,7 @@ log_to_database() {
     local fan_speed_hex=$6
     local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     
-    sqlite3 "$DB_FILE" <<EOF
-INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct)
-VALUES ($timestamp, $gpu_temp, $hotspot_temp, $memory_temp, $max_temp, $fan_speed_dec, $gpu_fan_pct);
-EOF
+    write_db_sql "INSERT INTO temperature_readings (timestamp, gpu_temp, hotspot_temp, memory_temp, max_temp, fan_speed, gpu_fan_pct) VALUES ($timestamp, $gpu_temp, $hotspot_temp, $memory_temp, $max_temp, $fan_speed_dec, $gpu_fan_pct);"
 }
 
 log_fan_event() {
@@ -386,25 +480,20 @@ log_fan_event() {
     details=${details//\'/\'\'}
     local fan_speed_dec=$(hex_to_dec "$fan_speed_hex")
     
-    sqlite3 "$DB_FILE" <<EOF
-INSERT INTO fan_events (timestamp, event_type, temperature, fan_speed, details)
-VALUES ($timestamp, '$event_type', $temperature, $fan_speed_dec, '$details');
-EOF
+    write_db_sql "INSERT INTO fan_events (timestamp, event_type, temperature, fan_speed, details) VALUES ($timestamp, '$event_type', $temperature, $fan_speed_dec, '$details');"
 }
 
 save_statistics_to_database() {
+    if [ -z "$DB_FILE" ]; then
+        return
+    fi
     local period_end=$(date +%s)
     local avg_temp=0
     if [ "$STATS_TEMP_READINGS" -gt 0 ]; then
         avg_temp=$((STATS_TEMP_SUM / STATS_TEMP_READINGS))
     fi
     
-    sqlite3 "$DB_FILE" <<EOF
-INSERT INTO statistics (period_start, period_end, peak_gpu_temp, peak_hotspot_temp, peak_memory_temp, 
-                       avg_gpu_temp, max_fan_events, high_temp_warnings)
-VALUES ($STATS_START_TIME, $period_end, $STATS_PEAK_GPU_TEMP, $STATS_PEAK_HOTSPOT_TEMP, 
-        $STATS_PEAK_MEMORY_TEMP, $avg_temp, $STATS_MAX_FAN_COUNT, $STATS_HIGH_TEMP_WARNINGS);
-EOF
+    write_db_sql "INSERT INTO statistics (period_start, period_end, peak_gpu_temp, peak_hotspot_temp, peak_memory_temp, avg_gpu_temp, max_fan_events, high_temp_warnings) VALUES ($STATS_START_TIME, $period_end, $STATS_PEAK_GPU_TEMP, $STATS_PEAK_HOTSPOT_TEMP, $STATS_PEAK_MEMORY_TEMP, $avg_temp, $STATS_MAX_FAN_COUNT, $STATS_HIGH_TEMP_WARNINGS);"
 }
 
 log_message() {
@@ -814,6 +903,7 @@ if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
     log_message "GPU fan assist active (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
     log_message "GPU-first policy active (GPU target maintained at least ${GPU_FAN_PRIORITY_MARGIN}% above chassis target where possible)"
     log_message "GPU hot latch policy active (HOT/CRITICAL holds GPU fan at 100% until below ${TEMP_NORMAL}C)"
+    log_message "GPU fan hysteresis active (GPU fan ramps down only after ${RAMPDOWN_DELAY}s stable)"
 else
     log_message "GPU fan assist inactive; chassis fan control only"
 fi
@@ -823,6 +913,8 @@ pending_decrease_speed=""
 decrease_pending_since=0
 hot_streak_count=0
 gpu_hot_latch=0
+pending_gpu_decrease_pct=""
+gpu_decrease_pending_since=0
 reset_statistics
 last_stats_report=$(date +%s)
 STATS_REPORT_INTERVAL=3600  # Report statistics every hour
@@ -896,6 +988,7 @@ while true; do
     fi
 
     if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
+        target_gpu_fan_pct=$(apply_gpu_fan_hysteresis "$target_gpu_fan_pct" "$gpu_hot_latch")
         set_gpu_fan_speed "$target_gpu_fan_pct" >/dev/null 2>&1
     fi
 
