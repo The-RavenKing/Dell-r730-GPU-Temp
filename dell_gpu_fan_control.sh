@@ -719,7 +719,7 @@ calculate_fan_speed_target() {
 }
 
 enforce_gpu_priority_policy() {
-    # GPU-first policy: raise GPU fan target above chassis demand and cap chassis in lower bands.
+    # GPU-first policy: raise GPU fan target above chassis demand and cap chassis only in cooler bands.
     local temp=$1
     local gpu_target_pct=$2
     local chassis_speed_hex=$3
@@ -733,8 +733,6 @@ enforce_gpu_priority_policy() {
         chassis_cap_hex=$FAN_MIN
     elif [ "$temp" -lt "$TEMP_WARM" ]; then
         chassis_cap_hex=$FAN_LOW
-    elif [ "$temp" -lt "$TEMP_HOT" ]; then
-        chassis_cap_hex=$FAN_NORMAL
     fi
 
     if [ -n "$chassis_cap_hex" ] && [ "$chassis_speed_dec" -gt "$(hex_to_dec "$chassis_cap_hex")" ]; then
