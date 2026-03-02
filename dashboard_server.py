@@ -49,6 +49,12 @@ DEFAULT_CONFIG = {
         'temp_warm': 60,
         'temp_hot': 70,
         'temp_critical': 80,
+        'chassis_fan_min': 20,
+        'chassis_fan_low': 30,
+        'chassis_fan_normal': 40,
+        'chassis_fan_warm': 55,
+        'chassis_fan_hot': 70,
+        'chassis_fan_critical': 100,
         'check_interval': 5,
         'rampdown_delay': 20,
         'sustained_hot_checks': 6
@@ -724,6 +730,12 @@ def update_fan_settings():
             'temp_warm': (40, 75, 'Warm temp threshold'),
             'temp_hot': (50, 85, 'Hot temp threshold'),
             'temp_critical': (60, 95, 'Critical temp threshold'),
+            'chassis_fan_min': (10, 100, 'Chassis fan min'),
+            'chassis_fan_low': (10, 100, 'Chassis fan low'),
+            'chassis_fan_normal': (10, 100, 'Chassis fan normal'),
+            'chassis_fan_warm': (10, 100, 'Chassis fan warm'),
+            'chassis_fan_hot': (10, 100, 'Chassis fan hot'),
+            'chassis_fan_critical': (10, 100, 'Chassis fan critical'),
             'check_interval': (2, 60, 'Check interval'),
             'rampdown_delay': (5, 120, 'Rampdown delay'),
             'sustained_hot_checks': (1, 60, 'Sustained hot checks')
@@ -781,6 +793,16 @@ def update_fan_settings():
         fc = config['fan_control']
         if not (fc['temp_low'] < fc['temp_normal'] < fc['temp_warm'] < fc['temp_hot'] < fc['temp_critical']):
             return jsonify({'error': 'Temperature thresholds must be in ascending order: low < normal < warm < hot < critical'}), 400
+        chassis_curve = (
+            int(fc.get('chassis_fan_min', 20)),
+            int(fc.get('chassis_fan_low', 30)),
+            int(fc.get('chassis_fan_normal', 40)),
+            int(fc.get('chassis_fan_warm', 55)),
+            int(fc.get('chassis_fan_hot', 70)),
+            int(fc.get('chassis_fan_critical', 100))
+        )
+        if chassis_curve != tuple(sorted(chassis_curve)):
+            return jsonify({'error': 'Chassis fan curve must be ascending: min <= low <= normal <= warm <= hot <= critical'}), 400
 
         if ext.get('gpu_fan_control_enabled'):
             display = ext.get('gpu_fan_display', '').strip()

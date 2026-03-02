@@ -168,6 +168,12 @@ cat > /tmp/config.defaults.json <<EOF
     "temp_warm": 60,
     "temp_hot": 70,
     "temp_critical": 80,
+    "chassis_fan_min": 20,
+    "chassis_fan_low": 30,
+    "chassis_fan_normal": 40,
+    "chassis_fan_warm": 55,
+    "chassis_fan_hot": 70,
+    "chassis_fan_critical": 100,
     "check_interval": 5,
     "rampdown_delay": 20,
     "sustained_hot_checks": 6

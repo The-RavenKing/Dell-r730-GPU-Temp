@@ -109,6 +109,20 @@ For the Quadro RTX 4000, the maximum operating temperature is around 90°C, but 
 - **Fans cycling too much?** Increase RAMPDOWN_DELAY to 30-40 seconds
 - **Temps remain high for long periods?** Lower `SUSTAINED_HOT_CHECKS` so safety escalation happens sooner
 
+You can also tune the **chassis fan curve** directly in the Settings page (min/low/normal/warm/hot/critical fan %).  
+Config keys (in `/var/lib/dell_gpu_fan_control/config.json` under `fan_control`):
+
+```json
+{
+  "chassis_fan_min": 20,
+  "chassis_fan_low": 30,
+  "chassis_fan_normal": 40,
+  "chassis_fan_warm": 55,
+  "chassis_fan_hot": 70,
+  "chassis_fan_critical": 100
+}
+```
+
 ### 2b. Optional: Enable GPU Fan Assist (Recommended for Lower Chassis Noise)
 
 The controller can also set the GPU onboard fan speed with `nvidia-settings`. This lets the script cool the GPU proactively before it has to push chassis fans as hard.

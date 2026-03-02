@@ -33,6 +33,12 @@ TEMP_CRITICAL=80
 CHECK_INTERVAL=5
 RAMPDOWN_DELAY=20
 SUSTAINED_HOT_CHECKS=6
+CHASSIS_FAN_MIN_PCT=20
+CHASSIS_FAN_LOW_PCT=30
+CHASSIS_FAN_NORMAL_PCT=40
+CHASSIS_FAN_WARM_PCT=55
+CHASSIS_FAN_HOT_PCT=70
+CHASSIS_FAN_CRITICAL_PCT=100
 GPU_NAME_FILTER="Quadro RTX 4000"
 GPU_INDEX=""
 GPU_FAN_CONTROL_ENABLED="false"
@@ -60,6 +66,12 @@ if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then
     CHECK_INTERVAL=$(jq -r '.fan_control.check_interval // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHECK_INTERVAL")
     RAMPDOWN_DELAY=$(jq -r '.fan_control.rampdown_delay // empty' "$CONFIG_FILE" 2>/dev/null || echo "$RAMPDOWN_DELAY")
     SUSTAINED_HOT_CHECKS=$(jq -r '.fan_control.sustained_hot_checks // empty' "$CONFIG_FILE" 2>/dev/null || echo "$SUSTAINED_HOT_CHECKS")
+    CHASSIS_FAN_MIN_PCT=$(jq -r '.fan_control.chassis_fan_min // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_MIN_PCT")
+    CHASSIS_FAN_LOW_PCT=$(jq -r '.fan_control.chassis_fan_low // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_LOW_PCT")
+    CHASSIS_FAN_NORMAL_PCT=$(jq -r '.fan_control.chassis_fan_normal // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_NORMAL_PCT")
+    CHASSIS_FAN_WARM_PCT=$(jq -r '.fan_control.chassis_fan_warm // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_WARM_PCT")
+    CHASSIS_FAN_HOT_PCT=$(jq -r '.fan_control.chassis_fan_hot // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_HOT_PCT")
+    CHASSIS_FAN_CRITICAL_PCT=$(jq -r '.fan_control.chassis_fan_critical // empty' "$CONFIG_FILE" 2>/dev/null || echo "$CHASSIS_FAN_CRITICAL_PCT")
     GPU_NAME_FILTER=$(jq -r '.external.gpu_name // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_NAME_FILTER")
     GPU_INDEX=$(jq -r '.external.gpu_index // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_INDEX")
     GPU_FAN_CONTROL_ENABLED=$(jq -r '.external.gpu_fan_control_enabled // empty' "$CONFIG_FILE" 2>/dev/null || echo "$GPU_FAN_CONTROL_ENABLED")
@@ -97,13 +109,40 @@ elif [ "$GPU_FAN_PRIORITY_MARGIN" -gt 50 ]; then
     GPU_FAN_PRIORITY_MARGIN=50
 fi
 
-# Fan speed settings (in hex, 0x00-0x64 = 0-100%)
-FAN_MIN=0x14       # 20% - minimum for airflow
-FAN_LOW=0x1E       # 30% - quiet operation
-FAN_NORMAL=0x28    # 40% - normal operation
-FAN_MEDIUM=0x37    # 55% - moderate cooling
-FAN_HIGH=0x46      # 70% - increased cooling
-FAN_MAX=0x64       # 100% - maximum cooling
+if ! [[ "$CHASSIS_FAN_MIN_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_MIN_PCT=20; fi
+if ! [[ "$CHASSIS_FAN_LOW_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_LOW_PCT=30; fi
+if ! [[ "$CHASSIS_FAN_NORMAL_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_NORMAL_PCT=40; fi
+if ! [[ "$CHASSIS_FAN_WARM_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_WARM_PCT=55; fi
+if ! [[ "$CHASSIS_FAN_HOT_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_HOT_PCT=70; fi
+if ! [[ "$CHASSIS_FAN_CRITICAL_PCT" =~ ^[0-9]+$ ]]; then CHASSIS_FAN_CRITICAL_PCT=100; fi
+
+if [ "$CHASSIS_FAN_MIN_PCT" -lt 10 ]; then CHASSIS_FAN_MIN_PCT=10; elif [ "$CHASSIS_FAN_MIN_PCT" -gt 100 ]; then CHASSIS_FAN_MIN_PCT=100; fi
+if [ "$CHASSIS_FAN_LOW_PCT" -lt 10 ]; then CHASSIS_FAN_LOW_PCT=10; elif [ "$CHASSIS_FAN_LOW_PCT" -gt 100 ]; then CHASSIS_FAN_LOW_PCT=100; fi
+if [ "$CHASSIS_FAN_NORMAL_PCT" -lt 10 ]; then CHASSIS_FAN_NORMAL_PCT=10; elif [ "$CHASSIS_FAN_NORMAL_PCT" -gt 100 ]; then CHASSIS_FAN_NORMAL_PCT=100; fi
+if [ "$CHASSIS_FAN_WARM_PCT" -lt 10 ]; then CHASSIS_FAN_WARM_PCT=10; elif [ "$CHASSIS_FAN_WARM_PCT" -gt 100 ]; then CHASSIS_FAN_WARM_PCT=100; fi
+if [ "$CHASSIS_FAN_HOT_PCT" -lt 10 ]; then CHASSIS_FAN_HOT_PCT=10; elif [ "$CHASSIS_FAN_HOT_PCT" -gt 100 ]; then CHASSIS_FAN_HOT_PCT=100; fi
+if [ "$CHASSIS_FAN_CRITICAL_PCT" -lt 10 ]; then CHASSIS_FAN_CRITICAL_PCT=10; elif [ "$CHASSIS_FAN_CRITICAL_PCT" -gt 100 ]; then CHASSIS_FAN_CRITICAL_PCT=100; fi
+
+if ! [ "$CHASSIS_FAN_MIN_PCT" -le "$CHASSIS_FAN_LOW_PCT" ] \
+    || ! [ "$CHASSIS_FAN_LOW_PCT" -le "$CHASSIS_FAN_NORMAL_PCT" ] \
+    || ! [ "$CHASSIS_FAN_NORMAL_PCT" -le "$CHASSIS_FAN_WARM_PCT" ] \
+    || ! [ "$CHASSIS_FAN_WARM_PCT" -le "$CHASSIS_FAN_HOT_PCT" ] \
+    || ! [ "$CHASSIS_FAN_HOT_PCT" -le "$CHASSIS_FAN_CRITICAL_PCT" ]; then
+    CHASSIS_FAN_MIN_PCT=20
+    CHASSIS_FAN_LOW_PCT=30
+    CHASSIS_FAN_NORMAL_PCT=40
+    CHASSIS_FAN_WARM_PCT=55
+    CHASSIS_FAN_HOT_PCT=70
+    CHASSIS_FAN_CRITICAL_PCT=100
+fi
+
+# Chassis fan speed settings (hex sent via IPMI, derived from configured percentages)
+FAN_MIN=$(printf "0x%02X" "$CHASSIS_FAN_MIN_PCT")
+FAN_LOW=$(printf "0x%02X" "$CHASSIS_FAN_LOW_PCT")
+FAN_NORMAL=$(printf "0x%02X" "$CHASSIS_FAN_NORMAL_PCT")
+FAN_MEDIUM=$(printf "0x%02X" "$CHASSIS_FAN_WARM_PCT")
+FAN_HIGH=$(printf "0x%02X" "$CHASSIS_FAN_HOT_PCT")
+FAN_MAX=$(printf "0x%02X" "$CHASSIS_FAN_CRITICAL_PCT")
 
 # Log file
 LOG_FILE="/var/log/dell_gpu_fan_control.log"
@@ -899,6 +938,7 @@ sleep 2
 log_message "Starting temperature monitoring loop (checking every ${CHECK_INTERVAL}s)..."
 log_message "Monitoring: GPU core, hotspot, and memory temperatures"
 log_message "Hysteresis enabled: Fans ramp UP immediately, ramp DOWN after ${RAMPDOWN_DELAY}s"
+log_message "Chassis fan curve active: min=${CHASSIS_FAN_MIN_PCT}% low=${CHASSIS_FAN_LOW_PCT}% normal=${CHASSIS_FAN_NORMAL_PCT}% warm=${CHASSIS_FAN_WARM_PCT}% hot=${CHASSIS_FAN_HOT_PCT}% critical=${CHASSIS_FAN_CRITICAL_PCT}%"
 if [ "${GPU_FAN_CONTROL_READY:-0}" -eq 1 ]; then
     log_message "GPU fan assist active (display=${GPU_FAN_DISPLAY}, fan=${GPU_FAN_TARGET})"
     log_message "GPU-first policy active (GPU target maintained at least ${GPU_FAN_PRIORITY_MARGIN}% above chassis target where possible)"

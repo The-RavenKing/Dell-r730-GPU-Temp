@@ -445,6 +445,16 @@
                 <div class="threshold-card"><label for="tempCritical">Critical</label><input type="number" id="tempCritical" value="{{ config.fan_control.temp_critical }}"><span class="unit">C</span></div>
             </div>
 
+            <label style="display:block;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Chassis Fan Curve</label>
+            <div class="threshold-grid">
+                <div class="threshold-card"><label for="chassisFanMin">Chassis Min</label><input type="number" id="chassisFanMin" value="{{ config.fan_control.chassis_fan_min | default(20) }}"><span class="unit">%</span></div>
+                <div class="threshold-card"><label for="chassisFanLow">Chassis Low</label><input type="number" id="chassisFanLow" value="{{ config.fan_control.chassis_fan_low | default(30) }}"><span class="unit">%</span></div>
+                <div class="threshold-card"><label for="chassisFanNormal">Chassis Normal</label><input type="number" id="chassisFanNormal" value="{{ config.fan_control.chassis_fan_normal | default(40) }}"><span class="unit">%</span></div>
+                <div class="threshold-card"><label for="chassisFanWarm">Chassis Warm</label><input type="number" id="chassisFanWarm" value="{{ config.fan_control.chassis_fan_warm | default(55) }}"><span class="unit">%</span></div>
+                <div class="threshold-card"><label for="chassisFanHot">Chassis Hot</label><input type="number" id="chassisFanHot" value="{{ config.fan_control.chassis_fan_hot | default(70) }}"><span class="unit">%</span></div>
+                <div class="threshold-card"><label for="chassisFanCritical">Chassis Critical</label><input type="number" id="chassisFanCritical" value="{{ config.fan_control.chassis_fan_critical | default(100) }}"><span class="unit">%</span></div>
+            </div>
+
             <hr class="divider">
 
             <div class="form-row">
@@ -562,6 +572,12 @@
                 check_interval: 6,
                 rampdown_delay: 35,
                 sustained_hot_checks: 9,
+                chassis_fan_min: 18,
+                chassis_fan_low: 24,
+                chassis_fan_normal: 32,
+                chassis_fan_warm: 45,
+                chassis_fan_hot: 60,
+                chassis_fan_critical: 85,
                 gpu_fan_priority_margin: 15,
                 gpu_fan_min: 30,
                 gpu_fan_low: 38,
@@ -579,6 +595,12 @@
                 check_interval: 5,
                 rampdown_delay: 20,
                 sustained_hot_checks: 6,
+                chassis_fan_min: 20,
+                chassis_fan_low: 30,
+                chassis_fan_normal: 40,
+                chassis_fan_warm: 55,
+                chassis_fan_hot: 70,
+                chassis_fan_critical: 100,
                 gpu_fan_priority_margin: 20,
                 gpu_fan_min: 35,
                 gpu_fan_low: 45,
@@ -596,6 +618,12 @@
                 check_interval: 3,
                 rampdown_delay: 15,
                 sustained_hot_checks: 3,
+                chassis_fan_min: 30,
+                chassis_fan_low: 40,
+                chassis_fan_normal: 55,
+                chassis_fan_warm: 70,
+                chassis_fan_hot: 85,
+                chassis_fan_critical: 100,
                 gpu_fan_priority_margin: 25,
                 gpu_fan_min: 45,
                 gpu_fan_low: 55,
@@ -635,6 +663,12 @@
             setNumericField('checkInterval', profile.check_interval);
             setNumericField('rampdownDelay', profile.rampdown_delay);
             setNumericField('sustainedHotChecks', profile.sustained_hot_checks);
+            setNumericField('chassisFanMin', profile.chassis_fan_min);
+            setNumericField('chassisFanLow', profile.chassis_fan_low);
+            setNumericField('chassisFanNormal', profile.chassis_fan_normal);
+            setNumericField('chassisFanWarm', profile.chassis_fan_warm);
+            setNumericField('chassisFanHot', profile.chassis_fan_hot);
+            setNumericField('chassisFanCritical', profile.chassis_fan_critical);
             setNumericField('gpuFanPriorityMargin', profile.gpu_fan_priority_margin);
             setNumericField('gpuFanMin', profile.gpu_fan_min);
             setNumericField('gpuFanLow', profile.gpu_fan_low);
@@ -721,6 +755,12 @@
                 temp_warm: document.getElementById('tempWarm').value,
                 temp_hot: document.getElementById('tempHot').value,
                 temp_critical: document.getElementById('tempCritical').value,
+                chassis_fan_min: document.getElementById('chassisFanMin').value,
+                chassis_fan_low: document.getElementById('chassisFanLow').value,
+                chassis_fan_normal: document.getElementById('chassisFanNormal').value,
+                chassis_fan_warm: document.getElementById('chassisFanWarm').value,
+                chassis_fan_hot: document.getElementById('chassisFanHot').value,
+                chassis_fan_critical: document.getElementById('chassisFanCritical').value,
                 check_interval: document.getElementById('checkInterval').value,
                 rampdown_delay: document.getElementById('rampdownDelay').value,
                 sustained_hot_checks: document.getElementById('sustainedHotChecks').value,
